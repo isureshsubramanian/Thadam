@@ -1,0 +1,48 @@
+{
+  "comment": "Shared test vectors. Read by thadam-core (tests/golden_file.rs) and the API (Thadam.Store.Tests/GoldenVectorTests.cs). Synthetic values only.",
+  "event_v2": {
+    "domain": "thadam.event.v2",
+    "rows": [
+      {
+        "seq": 1, "event_id": "0193a6f2-7c1e-7b4a-9d2e-5f8c1a3b6e90", "ts_us": 1794583912418000,
+        "tool": "tool-a", "session_id": "s-7f3e", "parent_session_id": null, "pid": 48211,
+        "process_path": "/usr/bin/curl", "category": "command", "action": "exec",
+        "target": "curl -H \"Authorization: Bearer [SECRET]\" https://api.example.test/v1/items",
+        "outcome": "allowed", "size_bytes": null, "bytes_out": null, "bytes_in": null,
+        "project": "/Users/dev/projects/sample-app", "flags": "secret_pattern", "count": 1,
+        "detections": "SECRET:1", "source": "os",
+        "hash": "cca2e7aa25a5885bf7340e0e111749dad90bb3727401a46090aea3ec6598ba92"
+      },
+      {
+        "seq": 2, "event_id": "0193a6f2-7c1f-7000-8000-000000000002", "ts_us": 1794583913000000,
+        "tool": "tool-a", "session_id": "s-9a01", "parent_session_id": "s-7f3e", "pid": 48212,
+        "process_path": "/bin/cat", "category": "file", "action": "read",
+        "target": "/Users/dev/projects/sample-app/src/main.rs",
+        "outcome": "allowed", "size_bytes": 2048, "bytes_out": null, "bytes_in": 0,
+        "project": null, "flags": "", "count": 418, "detections": "", "source": "agent,os",
+        "hash": "ba2352eb629780821ce40c27aa8421ed957e981ce340ba70c60fbb19aae0d586"
+      }
+    ]
+  },
+  "catalog_v1": {
+    "domain": "thadam.catalog.v1",
+    "rows": [
+      {
+        "seq": 1, "at_us": 1794700800000000, "kind": "closed", "segment": "events-2026-W46.db",
+        "first_seq": 1, "last_seq": 208268,
+        "first_prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "last_hash": "abababababababababababababababababababababababababababababababab",
+        "last_ts_us": 1794700771000000, "rows": 208268, "bytes": 184475648,
+        "reason": null, "detail": null, "from_us": null, "to_us": null, "missed": null,
+        "hash": "b02565f139b576a65c9cc901542765fe55e7e6ea14d0fa1dfdbdc135b999469e"
+      },
+      {
+        "seq": 2, "at_us": 1794701000000000, "kind": "paused", "segment": null,
+        "first_seq": null, "last_seq": null, "first_prev_hash": null, "last_hash": null,
+        "last_ts_us": null, "rows": null, "bytes": null, "reason": "low_disk", "detail": null,
+        "from_us": 1794700900000000, "to_us": 1794700960000000, "missed": 42,
+        "hash": "0b15506ac5347994dda3639160fff66837dcf4b22983f9ef5962c7b655171b60"
+      }
+    ]
+  }
+}

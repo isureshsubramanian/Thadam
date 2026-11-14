@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Thadam.Store/Thadam.Store.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Thadam.Store.Tests/Thadam.Store.Tests.csproj" />
+  </Folder>
+</Solution>

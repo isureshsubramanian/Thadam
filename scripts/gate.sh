@@ -2,6 +2,8 @@
 # Local gate. Run before every commit; every step must pass.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Tests and builds send nothing to Microsoft.
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 TESTINGPLATFORM_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 
 step() { printf '\n== %s\n' "$1"; }
 
@@ -14,16 +16,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "tests"
 cargo test --workspace
 
+step "api: format, build (warnings as errors), tests"
+# Run inside api/ so its global.json (SDK pin, test runner) applies.
+(
+    cd api
+    dotnet format Thadam.slnx --verify-no-changes
+    dotnet build Thadam.slnx -c Release --nologo -v quiet
+    dotnet test --solution Thadam.slnx --no-progress
+)
+
 step "licence policy"
 cargo deny check licenses bans sources
 
-step "third-party notices up to date"
+step "third-party notices up to date (licence policy for NuGet too)"
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+out="$(mktemp)"
+trap 'rm -f "$tmp" "$out"' EXIT
 cargo about generate --fail about.hbs -o "$tmp"
-if ! cmp -s "$tmp" THIRD-PARTY-NOTICES.txt; then
-    echo "THIRD-PARTY-NOTICES.txt is stale: run"
-    echo "  cargo about generate --fail about.hbs -o THIRD-PARTY-NOTICES.txt"
+node scripts/notices.mjs "$tmp" > "$out"
+if ! cmp -s "$out" THIRD-PARTY-NOTICES.txt; then
+    echo "THIRD-PARTY-NOTICES.txt is stale: run scripts/notices.sh"
     exit 1
 fi
 
@@ -48,7 +60,7 @@ if [[ ! -s "$names" ]]; then
     echo "missing name list: $names (one name per line)"
     exit 1
 fi
-if grep -rniwF -f "$names" --exclude-dir=.build crates/ macos/ README.md Cargo.toml; then
+if grep -rniwF -f "$names" --exclude-dir=.build --exclude-dir=bin --exclude-dir=obj --exclude=.name-gate.local crates/ macos/ api/ scripts/ README.md Cargo.toml; then
     echo "product names found in source (allowed only in adapters and the registry file)"
     exit 1
 fi

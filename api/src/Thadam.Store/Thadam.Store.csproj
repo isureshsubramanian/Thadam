@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Read-only access to the collector's store folder (ADR-008 Decision 1, ADR-009). -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thadam.Store.Tests" />
+  </ItemGroup>
+</Project>

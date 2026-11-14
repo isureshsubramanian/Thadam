@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Thadam.Store/Thadam.Store.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Shared with thadam-core's tests, so the Rust and C# chain verifiers can't drift. -->
+    <None Include="../../../crates/thadam-core/testdata/golden-chain.json" Link="golden-chain.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

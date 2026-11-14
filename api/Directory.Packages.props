@@ -1,0 +1,14 @@
+<Project>
+  <!-- Every NuGet package and its exact version. Licences are checked and notices generated
+       from the restored packages by scripts/notices.mjs (run by the gate). -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Shipped -->
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="11.0.0" />
+    <!-- Test only -->
+    <PackageVersion Include="xunit.v3" Version="4.0.3" />
+  </ItemGroup>
+</Project>

@@ -14,14 +14,21 @@
 !/THIRD-PARTY-NOTICES.txt
 !/crates/
 !/macos/
+!/api/
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
 !/scripts/migrate-store.sh
+!/scripts/notices.mjs
+!/scripts/notices.sh
+!/scripts/notices-input/
 !/scripts/swift-unwrap-check.pl
 
 # Never commit data or build output, even inside allowed folders.
 target/
+bin/
+obj/
+TestResults/
 *.db
 *.db-wal
 *.db-shm

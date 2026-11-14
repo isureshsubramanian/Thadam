@@ -1,0 +1,30 @@
+{
+  "comment": "Generator input for scripts/notices.mjs. Licence texts that packages declare by name but do not ship, fetched from each package's source repository at the commit named in its metadata. Never edit the generated notices file by hand; change this input instead.",
+  "texts": {
+    "efcore-LICENSE.txt": {
+      "source": "https://raw.githubusercontent.com/dotnet/dotnet/297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f/src/efcore/LICENSE.txt",
+      "retrieved": "2026-11-15"
+    },
+    "SQLitePCL.raw-LICENSE.TXT": {
+      "source": "https://raw.githubusercontent.com/ericsink/SQLitePCL.raw/ed046114d5a30534e13294d94d78eb73de896ad4/LICENSE.TXT",
+      "retrieved": "2026-11-15",
+      "note": "Identical at commit 96043b8cff323f21919df86a431c136655d81b4a (config.e_sqlite3, bundle_e_sqlite3)."
+    },
+    "SQLitePCL.raw-NOTICE.TXT": {
+      "source": "https://raw.githubusercontent.com/ericsink/SQLitePCL.raw/ed046114d5a30534e13294d94d78eb73de896ad4/NOTICE.TXT",
+      "retrieved": "2026-11-15",
+      "note": "Apache-2.0 section 4(d): merged into the notices. Identical at commit 96043b8cff323f21919df86a431c136655d81b4a."
+    }
+  },
+  "packages": [
+    { "match": "Microsoft.Data.Sqlite", "texts": ["efcore-LICENSE.txt"] },
+    { "match": "Microsoft.Data.Sqlite.Core", "texts": ["efcore-LICENSE.txt"] },
+    { "match": "SQLitePCLRaw.*", "texts": ["SQLitePCL.raw-LICENSE.TXT", "SQLitePCL.raw-NOTICE.TXT"] }
+  ],
+  "exceptions": {
+    "SQLite": {
+      "licence": "public domain",
+      "why": "The SQLite library is dedicated to the public domain (https://sqlite.org/copyright.html). No attribution is owed; its own LICENSE.txt is reproduced as a courtesy. Recorded in ADR-008 Dependencies, approved 2026-11-14."
+    }
+  }
+}
