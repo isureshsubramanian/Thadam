@@ -37,7 +37,11 @@ export const overview = {
     { tool: "cli_agent", displayName: "CLI agent", sessions: 2, filesRead: 35, filesWritten: 0, commands: 1, denied: 1, outside: 1, hosts: 1, flagged: 4 },
   ],
   outsideFolders: [{ folder: "~/.cargo/registry", records: 1, tools: ["cli_agent"], flags: [] }],
-  hosts: [{ target: "203.0.113.7:443", category: "network_external", flows: 1, bytesOut: 5000, bytesIn: 20000, unknown: true }],
+  hosts: [
+    { target: "203.0.113.7:443", category: "network_external", flows: 1, bytesOut: 5000, bytesIn: 20000, unknown: true, flaggedFlows: 1 },
+    // Listed in the registry after its first connections: the newest is known.
+    { target: "api.example-agent.test:443", category: "network_external", flows: 9, bytesOut: 900, bytesIn: 400, unknown: false, flaggedFlows: 4 },
+  ],
 };
 
 export const flagItem = {

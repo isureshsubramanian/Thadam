@@ -6,7 +6,7 @@ import { api, Rejected } from "../api/client";
 import { EventTable } from "../app/events";
 import { bytes, count, num } from "../app/format";
 import { go } from "../app/route";
-import { Empty, Loading, PageHead } from "../app/ui";
+import { Empty, HostFlag, Loading, PageHead } from "../app/ui";
 import { usePaged } from "../app/usePaged";
 
 const examples = [
@@ -75,7 +75,7 @@ function Results({ q }: { q: string }) {
             {hosts.map((h) => (
               <li key={`${h.target} ${h.category}`}>
                 <span className="mono clip">{h.target}</span>
-                {h.unknown && <span className="pill flag">unknown host</span>}
+                <HostFlag host={h} />
                 <span className="muted numv">{count(h.flows, "flow")} · ↑ {bytes(h.bytesOut)} · ↓ {bytes(h.bytesIn)}</span>
               </li>
             ))}

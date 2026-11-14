@@ -39,7 +39,10 @@ export const host = z.object({
   flows: count,
   bytesOut: count,
   bytesIn: count,
+  /** The newest connection in the range was to a host the registry did not list. */
   unknown: z.boolean(),
+  /** Connections in the range flagged as unknown when they were recorded. */
+  flaggedFlows: count,
 });
 export type Host = z.infer<typeof host>;
 

@@ -115,27 +115,24 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
             Host = q.Host,
             Range = q.Range,
         };
-        var hosts = new Dictionary<(string, string), (long Flows, long Out, long In, bool Unknown)>();
+        var hosts = new Dictionary<(string, string), HostTally>();
         foreach (var span in spans)
         {
             var where = Fields(context);
             where.Add("category LIKE 'network%'");
             await using var conn = await segments.OpenAsync(span, ct).ConfigureAwait(false);
-            await using var cmd = where.Command(conn, """
-                SELECT target, category, sum(count), sum(coalesce(bytes_out, 0)), sum(coalesce(bytes_in, 0)),
-                       max(instr(',' || flags || ',', ',unknown_host,') > 0)
-                FROM events WHERE {where} GROUP BY target, category
-                """);
+            await using var cmd = where.Command(conn,
+                "SELECT target, category, " + HostTally.Columns + " FROM events WHERE {where} GROUP BY target, category");
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
                 var key = (r.GetString(0), r.GetString(1));
-                var h = hosts.GetValueOrDefault(key);
-                hosts[key] = (h.Flows + r.GetInt64(2), h.Out + r.GetInt64(3), h.In + r.GetInt64(4), h.Unknown || r.GetInt64(5) != 0);
+                var h = hosts.TryGetValue(key, out var x) ? x : hosts[key] = new HostTally();
+                h.Add(r, 2);
             }
         }
-        return [.. hosts.OrderByDescending(h => h.Value.Out).ThenBy(h => h.Key.Item1, StringComparer.Ordinal).Take(MaxFolders)
-            .Select(h => new HostStats(h.Key.Item1, h.Key.Item2, h.Value.Flows, h.Value.Out, h.Value.In, h.Value.Unknown))];
+        return [.. hosts.OrderByDescending(h => h.Value.BytesOut).ThenBy(h => h.Key.Item1, StringComparer.Ordinal).Take(MaxFolders)
+            .Select(h => h.Value.ToStats(h.Key.Item1, h.Key.Item2))];
     }
 
     private static async Task ReadPageAsync(SqliteConnection conn, Where where, long below, List<EventView> rows, CancellationToken ct)

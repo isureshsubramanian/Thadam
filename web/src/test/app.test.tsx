@@ -45,6 +45,15 @@ describe("dashboard", () => {
     expect(screen.getByText(/Chain verified · seq 5–33/)).toBeTruthy();
   });
 
+  it("marks a host by its newest connection and keeps earlier flags in the tooltip", async () => {
+    fake.install(base);
+    render(<App />);
+    const now = await screen.findByText("unknown host");
+    expect(now.getAttribute("title")).toBe("Flagged as unknown on 1 of 1 connections in this range");
+    const before = screen.getByText("was unknown");
+    expect(before.getAttribute("title")).toBe("Flagged as unknown on 4 of 9 connections in this range; the newest was to a known host");
+  });
+
   it("a malformed response fails one view; the others keep working", async () => {
     fake.install({ ...base, "GET /overview": { status: 200, body: { kpis: "not an object" } } });
     render(<App />);

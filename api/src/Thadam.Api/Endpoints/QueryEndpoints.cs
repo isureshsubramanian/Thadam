@@ -223,6 +223,7 @@ public static class QueryEndpoints
         bytesOut = h.BytesOut,
         bytesIn = h.BytesIn,
         unknown = h.Unknown,
+        flaggedFlows = h.FlaggedFlows,
         category = h.Category,
     };
 

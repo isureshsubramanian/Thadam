@@ -31,7 +31,7 @@ public sealed class StoreQueries(SegmentIndex index)
         ToolAcc Tool(string t) => tools.TryGetValue(t, out var a) ? a : tools[t] = new ToolAcc();
         var outside = new Dictionary<string, (long Records, SortedSet<string> Tools, SortedSet<string> Flags)>(StringComparer.Ordinal);
         long outsideRecords = 0;
-        var hosts = new Dictionary<(string Target, string Category), HostAcc>();
+        var hosts = new Dictionary<(string Target, string Category), HostTally>();
         var sensitive = new SortedDictionary<string, long>(StringComparer.Ordinal);
         long deniedAgent = 0, deniedUser = 0, deniedOs = 0;
 
@@ -81,19 +81,15 @@ public sealed class StoreQueries(SegmentIndex index)
                 }
                 outside[key] = (o.Records + 1, o.Tools, o.Flags);
             }
-            await foreach (var r in QueryAsync(conn, filter, """
-                SELECT tool, target, category, sum(count), sum(coalesce(bytes_out, 0)), sum(coalesce(bytes_in, 0)),
-                       max(instr(',' || flags || ',', ',unknown_host,') > 0)
-                FROM events WHERE {filter} AND category LIKE 'network%' GROUP BY tool, target, category
-                """, null, ct).ConfigureAwait(false))
+            await foreach (var r in QueryAsync(conn, filter,
+                "SELECT tool, target, category, " + HostTally.Columns
+                    + " FROM events WHERE {filter} AND category LIKE 'network%' GROUP BY tool, target, category",
+                null, ct).ConfigureAwait(false))
             {
                 var key = (r.GetString(1), r.GetString(2));
                 Tool(r.GetString(0)).Hosts.Add(key.Item1);
-                var h = hosts.TryGetValue(key, out var x) ? x : hosts[key] = new HostAcc();
-                h.Flows += r.GetInt64(3);
-                h.BytesOut += r.GetInt64(4);
-                h.BytesIn += r.GetInt64(5);
-                h.Unknown |= r.GetInt64(6) != 0;
+                var h = hosts.TryGetValue(key, out var x) ? x : hosts[key] = new HostTally();
+                h.Add(r, 3);
             }
             await foreach (var r in QueryAsync(conn, filter,
                 "SELECT detections FROM events WHERE {filter} AND detections != ''", null, ct).ConfigureAwait(false))
@@ -129,7 +125,7 @@ public sealed class StoreQueries(SegmentIndex index)
             [.. outside.OrderByDescending(o => o.Value.Records).ThenBy(o => o.Key, StringComparer.Ordinal).Take(MaxListed)
                 .Select(o => new OutsideFolder(o.Key, o.Value.Records, [.. o.Value.Tools], [.. o.Value.Flags]))],
             [.. hosts.OrderByDescending(h => h.Value.BytesOut).ThenBy(h => h.Key.Target, StringComparer.Ordinal).Take(MaxListed)
-                .Select(h => new HostStats(h.Key.Target, h.Key.Category, h.Value.Flows, h.Value.BytesOut, h.Value.BytesIn, h.Value.Unknown))]);
+                .Select(h => h.Value.ToStats(h.Key.Target, h.Key.Category))]);
     }
 
     /// <summary>Every flagged-queue item in the range, newest first.</summary>
@@ -369,14 +365,6 @@ public sealed class StoreQueries(SegmentIndex index)
         public long Denied { get; set; }
         public long Outside { get; set; }
         public int FlaggedOpen { get; set; }
-    }
-
-    private sealed class HostAcc
-    {
-        public long Flows { get; set; }
-        public long BytesOut { get; set; }
-        public long BytesIn { get; set; }
-        public bool Unknown { get; set; }
     }
 
     private sealed class FlagAcc(Severity severity, string tool, long ts)

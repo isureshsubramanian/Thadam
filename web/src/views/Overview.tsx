@@ -4,7 +4,7 @@ import type { Overview as Data } from "../api/schemas";
 import { bytes, categoryName, count, num, words } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { go, type Route } from "../app/route";
-import { Empty, Loading, PageHead } from "../app/ui";
+import { Empty, HostFlag, Loading, PageHead } from "../app/ui";
 import { useApi } from "../app/useApi";
 
 interface Kpi {
@@ -130,7 +130,7 @@ export function Overview({ range }: { range: TimeRange }) {
               <li key={`${h.target} ${h.category}`}>
                 <span className="mono clip" title={h.target}>{h.target}</span>
                 <span className="pill">{categoryName[h.category] ?? words(h.category)}</span>
-                {h.unknown && <span className="pill flag">unknown host</span>}
+                <HostFlag host={h} />
                 <span className="muted numv">↑ {bytes(h.bytesOut)} · ↓ {bytes(h.bytesIn)}</span>
               </li>
             ))}

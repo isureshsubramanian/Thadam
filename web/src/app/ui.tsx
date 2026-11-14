@@ -1,7 +1,7 @@
 // Small shared pieces: icon buttons (tooltip + aria-label, global UI rule), pills, states.
 import type { ReactNode } from "react";
-import type { Severity } from "../api/schemas";
-import { cap, words } from "./format";
+import type { Host, Severity } from "../api/schemas";
+import { cap, num, words } from "./format";
 
 interface IconButtonProps {
   label: string;
@@ -33,6 +33,18 @@ export function FlagPills({ flags }: { flags: readonly string[] }) {
       ))}
     </>
   );
+}
+
+/**
+ * A host's unknown-host state. The pill follows the newest connection; the tooltip counts every
+ * flagged one, so a host added to the registry later still shows that it was once unknown.
+ */
+export function HostFlag({ host }: { host: Host }) {
+  if (host.flaggedFlows === 0) return null;
+  const tip = `Flagged as unknown on ${num(host.flaggedFlows)} of ${num(host.flows)} connections in this range`;
+  return host.unknown
+    ? <span className="pill flag" title={tip}>unknown host</span>
+    : <span className="pill" title={`${tip}; the newest was to a known host`}>was unknown</span>;
 }
 
 export function Loading() {

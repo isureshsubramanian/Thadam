@@ -63,7 +63,12 @@ public sealed record ToolStats(
 
 public sealed record OutsideFolder(string Folder, long Records, IReadOnlyList<string> Tools, IReadOnlyList<string> Flags);
 
-public sealed record HostStats(string Target, string Category, long Flows, long BytesOut, long BytesIn, bool Unknown);
+/// <summary>
+/// <c>Unknown</c>: the newest connection in the range was to a host the tool's registry entry did not
+/// list. <c>FlaggedFlows</c>: how many connections in the range were flagged when written.
+/// </summary>
+public sealed record HostStats(
+    string Target, string Category, long Flows, long BytesOut, long BytesIn, bool Unknown, long FlaggedFlows);
 
 public sealed record Overview(
     int Sessions,
