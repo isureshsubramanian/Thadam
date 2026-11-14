@@ -1,5 +1,5 @@
 //! Source item in, finished records out: tree, classify, pairing, collapse (ADR-003
-//! Decisions 3, 6, 7; ADR-006).
+//! Decisions 3, 6, 7; ADR-006), and network flows (ADR-007).
 //!
 //! No I/O here; `run.rs` feeds items in and writes records out.
 
@@ -11,10 +11,12 @@ use time::Duration;
 
 use crate::classify::classify;
 use crate::collapse::Collapser;
+use crate::netflow::{Attribution, NetFlows};
 use crate::pairing::{Pairing, Released};
 use crate::registry::Registry;
 use crate::rollup::{self, Rollup};
 use crate::snapshot::Snapshot;
+use crate::source::network::{FlowItem, FlowOpen, RejectReason};
 use crate::source::{EventKind, OsEvent, SkipReason, SourceItem};
 use crate::tree::ProcessTree;
 
@@ -29,6 +31,14 @@ pub struct Stats {
     pub records: u64,
     pub invalid: u64,
     pub written: u64,
+    /// Network source: `None` when off, else the extensions connected now. Shown, so
+    /// silence is never mistaken for "no traffic" (ADR-007 Risks).
+    pub network: Option<u64>,
+    pub flows: u64,
+    pub flows_kept: u64,
+    pub flows_rejected: BTreeMap<RejectReason, u64>,
+    pub net_gaps: u64,
+    pub net_missed: u64,
 }
 
 impl fmt::Display for Stats {
@@ -46,6 +56,24 @@ impl fmt::Display for Stats {
         )?;
         for (reason, n) in &self.skipped {
             write!(f, " skipped_{}={n}", reason.name())?;
+        }
+        match self.network {
+            None => write!(f, " network=off")?,
+            Some(connected) => {
+                let state = if connected > 0 {
+                    "connected"
+                } else {
+                    "not_connected"
+                };
+                write!(
+                    f,
+                    " network={state} flows={} flows_kept={} net_gaps={} net_missed={}",
+                    self.flows, self.flows_kept, self.net_gaps, self.net_missed
+                )?;
+                for (reason, n) in &self.flows_rejected {
+                    write!(f, " flows_rejected_{}={n}", reason.name())?;
+                }
+            }
         }
         Ok(())
     }
@@ -73,6 +101,10 @@ pub struct Pipeline {
     /// Holds opens until their close or exit shows whether the OS allowed them.
     pairing: Pairing,
     collapser: Collapser,
+    /// Holds network flows until the OS stream catches up, then collapses them (ADR-007).
+    net: NetFlows,
+    /// Time of the latest OS event handled.
+    watermark: Option<time::OffsetDateTime>,
     /// Finds secrets in roll-up candidates' paths, which must stay individual (ADR-005).
     redactor: Redactor,
     pub stats: Stats,
@@ -88,6 +120,8 @@ impl Pipeline {
             tree,
             pairing: Pairing::default(),
             collapser,
+            net: NetFlows::new(settings.window),
+            watermark: None,
             redactor: Redactor::with_default_detectors()?,
             stats: Stats::default(),
         })
@@ -117,6 +151,11 @@ impl Pipeline {
             }
         };
         self.stats.events += 1;
+
+        // HIDDEN COUPLING (ADR-007 Decision 4, see netflow.rs): flows older than this event
+        // are attributed before the tree applies it, so an exit here can't hide their process.
+        let mut net_rows = self.release_flows(Some(event.ts));
+        self.watermark = Some(self.watermark.map_or(event.ts, |w| w.max(event.ts)));
 
         let observation = self.tree.observe(&event, &self.registry);
         let pid = event.process.pid;
@@ -170,8 +209,49 @@ impl Pipeline {
         if let Some(session) = observation.session_ended {
             done.extend(self.collapser.flush_session(&session));
         }
+        done.append(&mut net_rows);
         self.stats.records += done.len() as u64;
         done
+    }
+
+    /// Processes one item from the network source and returns the rows it completed.
+    pub fn handle_flow(&mut self, item: FlowItem) -> Vec<NewEvent> {
+        match item {
+            FlowItem::Flow { flow, ts, event } => {
+                self.stats.flows += 1;
+                self.net.hold(ts, flow, event);
+            }
+            FlowItem::Gap { missed } => {
+                self.stats.net_gaps += 1;
+                self.stats.net_missed = self.stats.net_missed.saturating_add(missed);
+            }
+            FlowItem::Rejected(reason) => {
+                *self.stats.flows_rejected.entry(reason).or_insert(0) += 1;
+            }
+            FlowItem::Connected => {
+                self.stats.network = Some(self.stats.network.unwrap_or(0) + 1);
+            }
+            FlowItem::Disconnected => {
+                self.stats.network = Some(self.stats.network.unwrap_or(0).saturating_sub(1));
+            }
+        }
+        let done = self.release_flows(self.watermark);
+        self.stats.records += done.len() as u64;
+        done
+    }
+
+    /// Marks the network source as listening (no extension connected yet).
+    pub fn enable_network(&mut self) {
+        self.stats.network.get_or_insert(0);
+    }
+
+    fn release_flows(&mut self, before: Option<time::OffsetDateTime>) -> Vec<NewEvent> {
+        let tree = &self.tree;
+        let rows = self
+            .net
+            .release(before, |o| lookup(tree, o), &self.registry);
+        self.stats.flows_kept = self.net.stats.attributed;
+        rows
     }
 
     /// Closes every open window (shutdown or end of input).
@@ -180,6 +260,9 @@ impl Pipeline {
         let mut done = Vec::new();
         self.push_released(released, &mut done);
         done.extend(self.collapser.flush_all());
+        let tree = &self.tree;
+        done.extend(self.net.finish(|o| lookup(tree, o), &self.registry));
+        self.stats.flows_kept = self.net.stats.attributed;
         self.stats.records += done.len() as u64;
         done
     }
@@ -200,4 +283,9 @@ impl Pipeline {
             done.extend(self.collapser.push_with(r.record, r.rollup));
         }
     }
+}
+
+fn lookup(tree: &ProcessTree, open: &FlowOpen) -> Option<Attribution> {
+    tree.lookup(open.pid, open.pidversion, &open.ppids)
+        .map(|(member, executable)| Attribution { member, executable })
 }

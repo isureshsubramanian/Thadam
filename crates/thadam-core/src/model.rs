@@ -97,6 +97,8 @@ wire_enum!(
         RolledUp => "rolled_up",
         // The attempt was seen but its result could not be confirmed (ADR-006).
         Unconfirmed => "unconfirmed",
+        // Bytes moved on a connection already reported in an earlier window (ADR-007).
+        Continued => "continued",
     }
 );
 

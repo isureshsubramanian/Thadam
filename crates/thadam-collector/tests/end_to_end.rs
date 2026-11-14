@@ -17,7 +17,8 @@ const REGISTRY: &str = r#"{
   "tools": [
     { "key": "cli_agent",
       "match": [ { "team_id": "TEAM000001", "signing_id": "com.example.cli-agent" } ],
-      "state_dirs": [ "~/.cli-agent/" ] },
+      "state_dirs": [ "~/.cli-agent/" ],
+      "network": { "known_hosts": [ "*.example-agent.test" ] } },
     { "key": "second_agent",
       "match": [ { "team_id": "TEAM000002", "signing_id": "com.example.second-agent" } ] }
   ]
@@ -767,4 +768,233 @@ fn refused_opens_are_recorded_as_denied_by_os() {
     let agent_notes = find("/2.4.1", "/notes.txt");
     assert_eq!(agent_notes.2, "allowed");
     assert_eq!(rows.len(), 3, "{rows:?}");
+}
+
+/// One `thadam.flow.v1` record. Times are on the sample stream's clock (09:33:SS).
+fn flow(kind: &str, n: u32, secs: u32, fields: &str) -> String {
+    format!(
+        r#"{{"v":1,"kind":"{kind}","flow":"0192f3a4-0000-7000-8000-{n:012}","ts":"2026-11-14T09:33:{secs:02}.500Z"{fields}}}"#
+    )
+}
+
+fn flow_open(n: u32, secs: u32, pid: u32, ppids: &str, ip: &str, host: Option<&str>) -> String {
+    let host = match host {
+        Some(h) => format!(r#","host":"{h}","host_from":"api""#),
+        None => r#","host_from":"none""#.to_string(),
+    };
+    flow(
+        "open",
+        n,
+        secs,
+        &format!(
+            r#","pid":{pid},"pidversion":1,"ppids":{ppids},"proto":"tcp","direction":"out","remote_ip":"{ip}","remote_port":443{host}"#
+        ),
+    )
+}
+
+fn flow_bytes(kind: &str, n: u32, secs: u32, out: u64, inn: u64) -> String {
+    flow(
+        kind,
+        n,
+        secs,
+        &format!(r#","bytes_out":{out},"bytes_in":{inn}"#),
+    )
+}
+
+/// ADR-007 acceptance tests 2, 8 and 9: flow records arrive on the socket before the OS
+/// events that say whose they are; they are held, attributed, collapsed and written, and
+/// the chain verifies.
+#[test]
+fn network_flows_are_attributed_to_sessions() {
+    let dir = TempDir::new("net");
+    let socket = dir.path("s").join("f.sock");
+    let db = dir.path("events.db");
+    let mut child = Command::new(BIN)
+        .args(["run", "--source", "stdin", "--registry"])
+        .arg(dir.path("registry.json"))
+        .arg("--store")
+        .arg(&db)
+        .arg("--flow-socket")
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut conn = loop {
+        if let Ok(c) = std::os::unix::net::UnixStream::connect(&socket) {
+            break c;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "socket never appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    let records = [
+        // The agent (pid 4211) calls its API twice.
+        flow_open(
+            1,
+            5,
+            4211,
+            "[4100,1]",
+            "203.0.113.7",
+            Some("api.example-agent.test"),
+        ),
+        flow_bytes("stats", 1, 6, 300, 4000),
+        flow_bytes("close", 1, 7, 320, 4100),
+        flow_open(
+            2,
+            8,
+            4211,
+            "[4100,1]",
+            "203.0.113.7",
+            Some("api.example-agent.test"),
+        ),
+        flow_bytes("close", 2, 9, 80, 900),
+        // A short-lived helper the OS stream never shows, found through its ancestors;
+        // its connection is refused.
+        flow_open(3, 10, 4400, "[4300,4211,4100]", "198.51.100.20", None),
+        flow_bytes("close", 3, 10, 0, 0),
+        // An unrelated app: never written.
+        flow_open(
+            4,
+            11,
+            9999,
+            "[1]",
+            "198.51.100.30",
+            Some("www.example.test"),
+        ),
+        flow_bytes("close", 4, 12, 50, 5000),
+        // The child (pid 4300) connects just before its exit at 09:33:26.12. Released by that
+        // exit event *before* the tree removes the child, so its executable is still known.
+        flow_open(
+            5,
+            25,
+            4300,
+            "[4211,4100]",
+            "203.0.113.7",
+            Some("api.example-agent.test"),
+        ),
+        flow_bytes("close", 5, 25, 10, 20),
+        r#"{"v":1,"kind":"gap","ts":"2026-11-14T09:33:12Z","missed":7}"#.to_string(),
+        r#"{"v":1,"kind":"open","unexpected":"198.51.100.99"}"#.to_string(),
+    ];
+    conn.write_all((records.join("\n") + "\n").as_bytes())
+        .unwrap();
+    drop(conn);
+    // The listener reads on its own thread; give it time before the OS stream ends the run.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(sample_stream().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+
+    let store = Store::open_read_only(&db).unwrap();
+    assert!(store.verify().unwrap().is_ok());
+    let conn = store.connection();
+    let exec_session: String = conn
+        .query_row(
+            "SELECT session_id FROM events WHERE action = 'exec' ORDER BY seq LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT category, target, count, outcome, flags, bytes_out, bytes_in, process_path,
+                    session_id, source
+             FROM events WHERE action = 'connect' ORDER BY seq",
+        )
+        .unwrap();
+    type Net = (
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+    );
+    let got: Vec<Net> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let want = |target: &str, count, outcome: &str, flags: &str, out, inn, exe: &str| {
+        (
+            "network_external".to_string(),
+            target.to_string(),
+            count,
+            outcome.to_string(),
+            flags.to_string(),
+            out,
+            inn,
+            exe.to_string(),
+            exec_session.clone(),
+            "network".to_string(),
+        )
+    };
+    assert_eq!(
+        got,
+        vec![
+            want(
+                "api.example-agent.test:443",
+                2,
+                "allowed",
+                "",
+                400,
+                5000,
+                "/Users/test/.local/bin/2.4.1"
+            ),
+            want(
+                "198.51.100.20:443",
+                1,
+                "failed",
+                "unknown_host",
+                0,
+                0,
+                "(unknown)"
+            ),
+            want(
+                "api.example-agent.test:443",
+                1,
+                "allowed",
+                "",
+                10,
+                20,
+                "/usr/bin/cat"
+            ),
+        ]
+    );
+
+    assert!(stderr.contains("net_gaps=1 net_missed=7"), "{stderr}");
+    assert!(stderr.contains("flows=11 flows_kept=4"), "{stderr}");
+    assert!(stderr.contains("flows_rejected_malformed=1"), "{stderr}");
+    for leak in ["example.test", "198.51.100", "203.0.113"] {
+        assert!(!stderr.contains(leak), "{stderr}");
+    }
 }

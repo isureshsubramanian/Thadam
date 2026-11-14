@@ -1,10 +1,13 @@
 //! Threads and lifetimes (ADR-003 Decisions 8 and 10).
 //!
 //! ```text
-//! source ─▶ [reader thread] ─items─▶ [this thread: pipeline + redaction] ─records─▶ [writer thread: store]
+//! OS source   ─▶ [reader thread] ──┐
+//!                                  ├─items─▶ [this thread: pipeline + redaction] ─records─▶ [writer thread: store]
+//! flow socket ─▶ [listener threads]┘
 //! ```
 //!
-//! Both channels are bounded. If the writer falls behind, the pipeline waits, then the
+//! One pipeline thread owns the process tree, so OS events and network flows need no lock
+//! (ADR-007 Decision 4). Both channels are bounded. If the writer falls behind, the pipeline waits, then the
 //! reader, then the OS logger buffers: nothing is dropped silently.
 
 use std::io::BufReader;
@@ -20,6 +23,7 @@ use thadam_store::{Store, StoreError};
 use thiserror::Error;
 
 use crate::pipeline::{Pipeline, Stats};
+use crate::source::network::{FlowItem, FlowListener};
 use crate::source::{EventSource, SourceItem};
 
 /// The built-in macOS event logger, and the events this slice subscribes to (as Phase 0).
@@ -47,6 +51,15 @@ pub enum RunError {
     Source(String),
     #[error("writer thread stopped unexpectedly")]
     Writer,
+}
+
+/// What the pipeline thread receives.
+enum Input {
+    Os(Result<SourceItem, String>),
+    /// The OS source reached its end. Explicit, because the flow listener keeps the channel
+    /// open for as long as the process runs.
+    OsEnd,
+    Net(FlowItem),
 }
 
 /// How a run ended.
@@ -84,9 +97,12 @@ pub fn spawn_logger() -> std::io::Result<(Child, BufReader<ChildStdout>)> {
 /// ORDERING: `prepare` (the snapshot) runs after the reader has started, so events that
 /// happen while the snapshot is taken are buffered, not lost (see `snapshot.rs`).
 /// `on_stop` runs once when a stop is first seen; for the live logger it ends the child,
-/// which closes the pipe so the remaining output drains.
+/// which closes the pipe so the remaining output drains. `flows`, when given, is served
+/// for the whole run.
+#[allow(clippy::too_many_arguments)]
 pub fn run<S>(
     source: S,
+    flows: Option<FlowListener>,
     pipeline: &mut Pipeline,
     store: Store,
     stop: &AtomicBool,
@@ -98,7 +114,13 @@ where
     S: EventSource + Send + 'static,
 {
     let redactor = Redactor::with_default_detectors()?;
-    let (item_tx, item_rx) = sync_channel::<Result<SourceItem, String>>(ITEM_BUFFER);
+    let (item_tx, item_rx) = sync_channel::<Input>(ITEM_BUFFER);
+    if let Some(listener) = flows {
+        pipeline.enable_network();
+        let tx = item_tx.clone();
+        // Not joined either: it waits in accept for as long as the process runs.
+        std::thread::spawn(move || listener.serve(move |item| tx.send(Input::Net(item)).is_ok()));
+    }
     // Not joined: a reader blocked on a quiet input must not hold up shutdown.
     std::thread::spawn(move || read_all(source, &item_tx));
 
@@ -131,15 +153,18 @@ where
     Ok((ended, pipeline.stats.clone()))
 }
 
-fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Result<SourceItem, String>>) {
+fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>) {
     loop {
         let item = match source.next() {
             Ok(Some(item)) => Ok(item),
-            Ok(None) => return,
+            Ok(None) => {
+                let _ = tx.send(Input::OsEnd);
+                return;
+            }
             Err(e) => Err(e.to_string()),
         };
         let failed = item.is_err();
-        if tx.send(item).is_err() || failed {
+        if tx.send(Input::Os(item)).is_err() || failed {
             return;
         }
     }
@@ -166,7 +191,7 @@ struct Progress<'a> {
 fn process(
     pipeline: &mut Pipeline,
     redactor: &Redactor,
-    items: &Receiver<Result<SourceItem, String>>,
+    items: &Receiver<Input>,
     records: &SyncSender<EventRecord>,
     stop: &AtomicBool,
     on_stop: impl FnOnce(),
@@ -192,13 +217,14 @@ fn process(
             last_report = Instant::now();
         }
         match items.recv_timeout(POLL) {
-            Ok(Ok(item)) => send(pipeline.handle(item), pipeline, redactor, records)?,
-            Ok(Err(e)) => {
+            Ok(Input::Os(Ok(item))) => send(pipeline.handle(item), pipeline, redactor, records)?,
+            Ok(Input::Net(item)) => send(pipeline.handle_flow(item), pipeline, redactor, records)?,
+            Ok(Input::Os(Err(e))) => {
                 send(pipeline.finish(), pipeline, redactor, records)?;
                 return Err(RunError::Source(e));
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => {
+            Ok(Input::OsEnd) | Err(RecvTimeoutError::Disconnected) => {
                 break if stop_seen.is_some() {
                     Ended::Stopped
                 } else {

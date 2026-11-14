@@ -5,6 +5,7 @@
 //! `OsEvent` has no environment field: the exec environment never becomes a value here.
 
 pub mod eslogger;
+pub mod network;
 
 use std::fmt;
 

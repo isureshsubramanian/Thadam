@@ -3,6 +3,7 @@
 
 pub mod classify;
 pub mod collapse;
+pub mod netflow;
 pub mod pairing;
 pub mod pipeline;
 pub mod registry;

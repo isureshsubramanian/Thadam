@@ -12,6 +12,7 @@ use thadam_core::model::MAX_TOOL_KEY;
 use thiserror::Error;
 
 use crate::source::Identity;
+use crate::source::network::is_host_name;
 
 /// Longest accepted signing identifier, in bytes (estimate; real ones are reverse-DNS names).
 const MAX_SIGNING_ID: usize = 255;
@@ -37,6 +38,14 @@ pub const DEFAULT_READ_BUDGET: usize = 100;
 const MAX_READ_BUDGET: usize = 100_000;
 /// Longest accepted roll-up folder name, in bytes (the usual file name limit).
 const MAX_NAME: usize = 255;
+/// Bytes out in one network row that make it a large upload (ADR-007 Decision 5, estimate).
+pub const DEFAULT_LARGE_UPLOAD: i64 = 10 * 1024 * 1024;
+/// Bytes out from one session to one host in an hour that make a large upload (estimate).
+pub const DEFAULT_LARGE_UPLOAD_SESSION: i64 = 50 * 1024 * 1024;
+/// Largest accepted upload threshold (1 TiB; above this the flag can't fire in practice).
+const MAX_UPLOAD_THRESHOLD: i64 = 1 << 40;
+/// Most host patterns per tool (estimate; real lists are a handful).
+const MAX_KNOWN_HOSTS: usize = 1_000;
 
 #[derive(Debug, Error)]
 pub enum RegistryError {
@@ -155,12 +164,67 @@ impl Matcher {
     }
 }
 
+/// A host the tool is expected to talk to: an exact name, or `*.` and a suffix, which
+/// matches names below the suffix but not the suffix itself (ADR-007 Decision 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostPattern {
+    Exact(String),
+    /// Stored with its leading dot, for example `.example.test`.
+    Below(String),
+}
+
+impl HostPattern {
+    fn parse(pattern: &str) -> Self {
+        let p = pattern.to_ascii_lowercase();
+        match p.strip_prefix('*') {
+            Some(suffix) => HostPattern::Below(suffix.to_string()),
+            None => HostPattern::Exact(p),
+        }
+    }
+
+    /// `host` is expected lower case (the network source normalises it).
+    pub fn matches(&self, host: &str) -> bool {
+        match self {
+            HostPattern::Exact(name) => name == host,
+            HostPattern::Below(suffix) => {
+                host.len() > suffix.len() && host.ends_with(suffix.as_str())
+            }
+        }
+    }
+}
+
+/// What a tool's network rows are checked against (ADR-007 Decisions 5 and 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkPolicy {
+    pub known_hosts: Vec<HostPattern>,
+    pub large_upload_bytes: i64,
+    pub large_upload_session_bytes: i64,
+}
+
+impl Default for NetworkPolicy {
+    fn default() -> Self {
+        Self {
+            known_hosts: Vec::new(),
+            large_upload_bytes: DEFAULT_LARGE_UPLOAD,
+            large_upload_session_bytes: DEFAULT_LARGE_UPLOAD_SESSION,
+        }
+    }
+}
+
+impl NetworkPolicy {
+    /// True when `host` matches one of the tool's known hosts.
+    pub fn is_known_host(&self, host: &str) -> bool {
+        self.known_hosts.iter().any(|p| p.matches(host))
+    }
+}
+
 /// One registered tool.
 #[derive(Debug, Clone)]
 pub struct Tool {
     pub key: String,
     matchers: Vec<Matcher>,
     state_dirs: Vec<PathPattern>,
+    pub network: NetworkPolicy,
 }
 
 impl Tool {
@@ -211,6 +275,7 @@ impl Registry {
                     RegistryError::Invalid(format!("tools[{i}].match[{j}]: {reason}"))
                 })?);
             }
+            let network = entry.network.unwrap_or_default();
             tools.push(Tool {
                 key: entry.key,
                 matchers,
@@ -219,6 +284,15 @@ impl Registry {
                     .iter()
                     .map(|p| PathPattern::parse(p))
                     .collect(),
+                network: NetworkPolicy {
+                    known_hosts: network
+                        .known_hosts
+                        .iter()
+                        .map(|p| HostPattern::parse(p))
+                        .collect(),
+                    large_upload_bytes: network.large_upload_bytes,
+                    large_upload_session_bytes: network.large_upload_session_bytes,
+                },
             });
         }
         Ok(Self {
@@ -343,6 +417,43 @@ struct ToolEntry {
     #[serde(default)]
     #[garde(inner(custom(path_pattern)))]
     state_dirs: Vec<String>,
+    #[serde(default)]
+    #[garde(dive)]
+    network: Option<NetworkEntry>,
+}
+
+/// Per tool, the hosts it is expected to reach and the upload thresholds (ADR-007
+/// Decision 6). Real host names live only in the real registry file.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+struct NetworkEntry {
+    #[serde(default)]
+    #[garde(length(max = MAX_KNOWN_HOSTS), inner(custom(host_pattern)))]
+    known_hosts: Vec<String>,
+    #[serde(default = "default_large_upload")]
+    #[garde(range(min = 1, max = MAX_UPLOAD_THRESHOLD))]
+    large_upload_bytes: i64,
+    #[serde(default = "default_large_upload_session")]
+    #[garde(range(min = 1, max = MAX_UPLOAD_THRESHOLD))]
+    large_upload_session_bytes: i64,
+}
+
+impl Default for NetworkEntry {
+    fn default() -> Self {
+        Self {
+            known_hosts: Vec::new(),
+            large_upload_bytes: DEFAULT_LARGE_UPLOAD,
+            large_upload_session_bytes: DEFAULT_LARGE_UPLOAD_SESSION,
+        }
+    }
+}
+
+fn default_large_upload() -> i64 {
+    DEFAULT_LARGE_UPLOAD
+}
+
+fn default_large_upload_session() -> i64 {
+    DEFAULT_LARGE_UPLOAD_SESSION
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -492,6 +603,21 @@ fn absolute_path(value: &str, _ctx: &()) -> garde::Result {
     }
 }
 
+/// An exact host name, or `*.` and a name of at least two labels (no bare `*`, no `*.test`).
+fn host_pattern(value: &str, _ctx: &()) -> garde::Result {
+    let ok = match value.strip_prefix("*.") {
+        Some(suffix) => is_host_name(suffix) && suffix.contains('.'),
+        None => !value.contains('*') && is_host_name(value),
+    };
+    if ok && !value.ends_with('.') {
+        Ok(())
+    } else {
+        Err(garde::Error::new(
+            "must be a host name, or '*.' and a name with at least two labels",
+        ))
+    }
+}
+
 fn path_pattern(value: &str, _ctx: &()) -> garde::Result {
     let ok_start = value.starts_with('/') || value.starts_with("~/");
     if ok_start && value.len() <= MAX_PATTERN && !value.contains('\0') {
@@ -631,6 +757,39 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn network_policy_per_tool() {
+        let r = Registry::parse(
+            r#"{"version":1,"tools":[
+                {"key":"t","match":[{"path":"/x"}],
+                 "network":{"known_hosts":["*.Example-Agent.test","registry.example.test"],
+                            "large_upload_bytes":1000}},
+                {"key":"u","match":[{"path":"/y"}]}]}"#,
+        )
+        .unwrap();
+        let t = &r.tools().next().unwrap().network;
+        assert!(t.is_known_host("api.example-agent.test"));
+        assert!(t.is_known_host("a.b.example-agent.test"));
+        assert!(!t.is_known_host("example-agent.test"));
+        assert!(!t.is_known_host("evil-example-agent.test"));
+        assert!(t.is_known_host("registry.example.test"));
+        assert!(!t.is_known_host("x.registry.example.test"));
+        assert_eq!(t.large_upload_bytes, 1000);
+        assert_eq!(t.large_upload_session_bytes, DEFAULT_LARGE_UPLOAD_SESSION);
+        let u = &r.tools().nth(1).unwrap().network;
+        assert_eq!(*u, NetworkPolicy::default());
+
+        for bad in ["*", "*.test", "a.*.test", "bad host.test", "*.", "a.test."] {
+            let json = format!(
+                r#"{{"version":1,"tools":[{{"key":"t","match":[{{"path":"/x"}}],"network":{{"known_hosts":["{bad}"]}}}}]}}"#
+            );
+            let err = Registry::parse(&json).unwrap_err().to_string();
+            assert!(err.contains("known_hosts"), "{bad}: {err}");
+        }
+        let zero = r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}],"network":{"large_upload_bytes":0}}]}"#;
+        assert!(Registry::parse(zero).is_err());
     }
 
     #[test]

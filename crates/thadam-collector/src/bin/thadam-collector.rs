@@ -17,10 +17,12 @@ use thadam_collector::registry::Registry;
 use thadam_collector::run::{Ended, run, spawn_logger};
 use thadam_collector::snapshot::{self, SystemProcessTable};
 use thadam_collector::source::eslogger::EsloggerSource;
+use thadam_collector::source::network::{DEFAULT_SOCKET, FlowListener};
 use thadam_store::Store;
 
 const USAGE: &str = "usage:
   thadam-collector run --registry <file> --store <db> [--source eslogger|stdin] [--window-secs <n>]
+                       [--flow-socket <path>|off]   (default: the system path with eslogger, off with stdin)
   thadam-collector check-registry <file>
   thadam-collector snapshot --registry <file>";
 
@@ -60,6 +62,7 @@ struct Options {
     store: Option<String>,
     source: Option<String>,
     window_secs: Option<String>,
+    flow_socket: Option<String>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, Failure> {
@@ -71,6 +74,7 @@ fn parse_options(args: &[String]) -> Result<Options, Failure> {
             "--store" => &mut o.store,
             "--source" => &mut o.source,
             "--window-secs" => &mut o.window_secs,
+            "--flow-socket" => &mut o.flow_socket,
             _ => return Err(Failure::Usage(USAGE.to_string())),
         };
         *slot = Some(
@@ -143,6 +147,8 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         settings.window = time::Duration::seconds(secs);
     }
     let store = Store::open(store_path).map_err(|e| Failure::Usage(e.to_string()))?;
+    let source = o.source.as_deref().unwrap_or("eslogger");
+    let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut signals =
@@ -158,7 +164,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
 
     let mut pipeline =
         Pipeline::new(registry, settings).map_err(|e| Failure::Runtime(e.to_string()))?;
-    let (ended, stats) = match o.source.as_deref().unwrap_or("eslogger") {
+    let (ended, stats) = match source {
         "eslogger" => {
             let (child, stdout) = spawn_logger()
                 .map_err(|e| Failure::Runtime(format!("cannot start the OS logger: {e}")))?;
@@ -166,6 +172,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
             let killer = Arc::clone(&child);
             let result = run(
                 EsloggerSource::new(stdout),
+                flows,
                 &mut pipeline,
                 store,
                 &stop,
@@ -185,6 +192,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         }
         "stdin" => run(
             EsloggerSource::new(BufReader::new(std::io::stdin())),
+            flows,
             &mut pipeline,
             store,
             &stop,
@@ -199,11 +207,29 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     eprintln!("thadam-collector: final {stats}");
     // A stop request that raced the logger's own exit is still a clean stop.
     let stopped = stop.load(Ordering::SeqCst);
-    match (ended, o.source.as_deref().unwrap_or("eslogger")) {
+    match (ended, source) {
         (Ended::EndOfInput, "eslogger") if !stopped => Err(Failure::Runtime(
             "the OS logger exited; stopping so the service manager can restart".into(),
         )),
         _ => Ok(()),
+    }
+}
+
+/// The network source's socket. A path given explicitly must work; the default is best
+/// effort, and the stats line then says `network=off`.
+fn open_flow_socket(arg: Option<&str>, source: &str) -> Result<Option<FlowListener>, Failure> {
+    match (arg, source) {
+        (Some("off"), _) | (None, "stdin") => Ok(None),
+        (Some(path), _) => FlowListener::bind(path)
+            .map(Some)
+            .map_err(|e| Failure::Usage(format!("cannot listen for network flows: {e}"))),
+        (None, _) => match FlowListener::bind(DEFAULT_SOCKET) {
+            Ok(l) => Ok(Some(l)),
+            Err(e) => {
+                eprintln!("thadam-collector: network flows not recorded, cannot listen: {e}");
+                Ok(None)
+            }
+        },
     }
 }
 

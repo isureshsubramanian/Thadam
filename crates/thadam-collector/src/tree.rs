@@ -28,6 +28,8 @@ struct Entry {
     /// `None` for processes seeded from the snapshot, until their first event says.
     pidversion: Option<u32>,
     membership: Membership,
+    /// The running image, once an event has named it (network rows need it, ADR-007).
+    executable: Option<Arc<str>>,
 }
 
 /// What the tree concluded from one event.
@@ -101,6 +103,7 @@ impl ProcessTree {
                     Entry {
                         pidversion: None,
                         membership: m.clone(),
+                        executable: None,
                     },
                 );
             }
@@ -132,7 +135,12 @@ impl ProcessTree {
                     None => (current.clone(), current),
                 };
                 if let Some(m) = &member {
-                    self.insert(event.process.pid, target.pidversion, m.clone());
+                    self.insert(
+                        event.process.pid,
+                        target.pidversion,
+                        m.clone(),
+                        &target.executable,
+                    );
                 }
                 Observation {
                     member,
@@ -142,7 +150,7 @@ impl ProcessTree {
             }
             EventKind::Fork { child } => {
                 if let Some(m) = &current {
-                    self.insert(child.pid, child.pidversion, m.clone());
+                    self.insert(child.pid, child.pidversion, m.clone(), &child.executable);
                 }
                 Observation::same(current, None)
             }
@@ -170,6 +178,7 @@ impl ProcessTree {
                 Some(v) if process.pidversion < v => return None,
                 None => {
                     entry.pidversion = Some(process.pidversion);
+                    entry.executable = Some(Arc::from(process.executable.as_str()));
                     return Some(entry.membership.clone());
                 }
                 // The pid was reused by a process we never saw start.
@@ -189,16 +198,43 @@ impl ProcessTree {
                     .and_then(|r| self.members.get(&r))
             })
             .map(|e| e.membership.clone())?;
-        self.insert(process.pid, process.pidversion, inherited.clone());
+        self.insert(
+            process.pid,
+            process.pidversion,
+            inherited.clone(),
+            &process.executable,
+        );
         Some(inherited)
     }
 
-    fn insert(&mut self, pid: u32, pidversion: u32, membership: Membership) {
+    /// Membership and executable for a network flow (ADR-007 Decision 4), without changing
+    /// the tree: the process itself if it is the same image, else the nearest member among
+    /// the ancestors the extension captured at flow start (executable then unknown).
+    pub fn lookup(
+        &self,
+        pid: u32,
+        pidversion: u32,
+        ancestors: &[u32],
+    ) -> Option<(Membership, Option<Arc<str>>)> {
+        if let Some(entry) = self.members.get(&pid)
+            && entry.pidversion.is_none_or(|v| v == pidversion)
+        {
+            return Some((entry.membership.clone(), entry.executable.clone()));
+        }
+        ancestors
+            .iter()
+            .filter(|a| **a != pid)
+            .find_map(|a| self.members.get(a))
+            .map(|e| (e.membership.clone(), None))
+    }
+
+    fn insert(&mut self, pid: u32, pidversion: u32, membership: Membership, executable: &str) {
         self.members.insert(
             pid,
             Entry {
                 pidversion: Some(pidversion),
                 membership,
+                executable: Some(Arc::from(executable)),
             },
         );
     }
@@ -342,6 +378,32 @@ mod tests {
                 .member
                 .is_none()
         );
+    }
+
+    #[test]
+    fn lookup_finds_the_flow_process_or_its_nearest_member_ancestor() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        t.observe(&fork(300, 301), &r);
+        let len = t.len();
+
+        let (m, exe) = t.lookup(300, 1, &[200, 1]).unwrap();
+        assert_eq!(m.session_id, root.session_id);
+        assert_eq!(exe.as_deref(), Some("/Users/test/.local/bin/2.4.1"));
+        assert_eq!(t.lookup(301, 1, &[300]).unwrap().1.as_deref(), Some("/x"));
+        // Gone from the tree (or a different image): the captured ancestors still find
+        // the session, but not the executable.
+        let (m, exe) = t.lookup(450, 7, &[301, 300, 200]).unwrap();
+        assert_eq!(m.session_id, root.session_id);
+        assert_eq!(exe, None);
+        assert_eq!(t.lookup(301, 9, &[300]).unwrap().1, None);
+        assert!(t.lookup(999, 1, &[1]).is_none());
+        // Read only.
+        assert_eq!(t.len(), len);
     }
 
     #[test]
