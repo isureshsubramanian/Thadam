@@ -5,10 +5,12 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Thadam.Api.Endpoints;
+using Thadam.Api.Search;
 using Thadam.Api.Security;
 using Thadam.Audit;
 using Thadam.Store;
 using Thadam.Store.Queries;
+using Thadam.Store.Search;
 
 namespace Thadam.Api;
 
@@ -62,6 +64,10 @@ public static class ApiHost
         builder.Services.AddSingleton(index);
         builder.Services.AddSingleton(new StoreQueries(index));
         builder.Services.AddSingleton<ToolRegistry>();
+        var search = await SearchIndex.OpenAsync(options.SearchPath, ct).ConfigureAwait(false);
+        builder.Services.AddSingleton(search);
+        builder.Services.AddSingleton(new SearchRunner(index, search));
+        builder.Services.AddHostedService<SearchIndexer>();
         builder.Services.AddSingleton<ChainMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ChainMonitor>());
 
@@ -135,7 +141,12 @@ public static class ApiHost
         SessionEndpoints.Map(api);
         MetaEndpoints.Map(api);
         QueryEndpoints.Map(api);
-        app.Lifetime.ApplicationStopped.Register(() => audit.DisposeAsync().AsTask().GetAwaiter().GetResult());
+        SearchEndpoints.Map(api);
+        app.Lifetime.ApplicationStopped.Register(() =>
+        {
+            search.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            audit.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        });
         return app;
     }
 }

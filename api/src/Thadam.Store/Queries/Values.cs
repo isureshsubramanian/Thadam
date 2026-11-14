@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Thadam.Store.Queries;
 
@@ -9,7 +10,7 @@ public readonly record struct TimeRange(long FromUs, long ToUs)
 }
 
 /// <summary>Parsing and printing of the stored list columns and times.</summary>
-public static class Values
+public static partial class Values
 {
     /// <summary><c>flags</c>: sorted wire names joined by commas (thadam-core <c>wire_set</c>).</summary>
     public static IReadOnlySet<string> Flags(string flags) =>
@@ -39,6 +40,17 @@ public static class Values
 
     public static string Time(long us) =>
         DateTimeOffset.UnixEpoch.AddTicks(us * 10).ToString("yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture);
+
+    /// <summary>RFC 3339 date-time: a full date, time, optional fraction and an offset or Z.</summary>
+    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)]
+    private static partial Regex Rfc3339Pattern();
+
+    /// <summary>Parses an RFC 3339 date-time; null when it is not one.</summary>
+    public static DateTimeOffset? ParseTime(string? s) =>
+        s is { Length: <= 40 } && Rfc3339Pattern().IsMatch(s)
+        && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
+            ? t
+            : null;
 
     public static long Micros(DateTimeOffset t) => (t.UtcTicks - DateTimeOffset.UnixEpoch.UtcTicks) / 10;
 

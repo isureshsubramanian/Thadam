@@ -14,12 +14,12 @@ public sealed class StoreQueries(SegmentIndex index)
     private const int MaxListed = 100;
     private const int MaxSessionTree = 1000;
 
-    private const string Columns = """
+    internal const string Columns = """
         seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path, category, action,
         target, outcome, size_bytes, bytes_out, bytes_in, project, flags, count, detections, source
         """;
 
-    private const string FlaggedCondition =
+    internal const string FlaggedCondition =
         "(flags != '' OR detections != '' OR outcome IN ('denied_by_agent', 'denied_by_user', 'denied_by_os'))";
 
     public SegmentIndex Index => index;
@@ -349,7 +349,7 @@ public sealed class StoreQueries(SegmentIndex index)
         }
     }
 
-    private static EventView ReadEvent(SqliteDataReader r)
+    internal static EventView ReadEvent(SqliteDataReader r)
     {
         var row = ChainVerifier.ReadRow(r);
         var flags = Values.Flags(row.Flags);

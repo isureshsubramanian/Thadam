@@ -12,6 +12,8 @@ public sealed record ApiOptions(string StorePath, string RegistryPath, string Da
 
     public string KeysPath => Path.Combine(DataDir, "keys");
 
+    public string SearchPath => Path.Combine(DataDir, "search.db");
+
     /// <summary>The defaults: the root-owned store and registry, the user's own API folder.</summary>
     public static ApiOptions Defaults() => new(
         Path.Combine(SystemFolder, "store"),

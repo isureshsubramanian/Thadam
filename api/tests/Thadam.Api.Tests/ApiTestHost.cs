@@ -47,11 +47,17 @@ public sealed class ApiTestHost : IAsyncDisposable
 
     public ICollection<string> Urls => _app.Urls;
 
-    public static async Task<ApiTestHost> StartAsync(StoreFixture store, CancellationToken ct)
+    public static Task<ApiTestHost> StartAsync(StoreFixture store, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(store);
+        return StartAsync(store.Folder, ct);
+    }
+
+    /// <summary>A server over any store folder (the benchmark's).</summary>
+    public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct)
+    {
         var dataDir = Path.Combine(Path.GetTempPath(), $"thadam-api-test-{Guid.NewGuid():N}");
-        var options = new ApiOptions(store.Folder, Path.Combine(dataDir, "registry.json"), dataDir, 0);
+        var options = new ApiOptions(storeFolder, Path.Combine(dataDir, "registry.json"), dataDir, 0);
         await Credentials.SaveAsync(options.CredentialsPath, Credentials.Create(Password), ct);
         await File.WriteAllTextAsync(options.RegistryPath, Registry, ct);
         var app = await ApiHost.BuildAsync(options, TimeProvider.System, ct);

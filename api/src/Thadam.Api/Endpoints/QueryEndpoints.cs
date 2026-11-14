@@ -72,15 +72,7 @@ public static class QueryEndpoints
                 flagged = t.FlaggedOpen,
             }),
             outsideFolders = o.Outside.Select(f => new { folder = f.Folder, records = f.Records, tools = f.Tools, flags = f.Flags }),
-            hosts = o.Hosts.Select(h => new
-            {
-                target = h.Target,
-                flows = h.Flows,
-                bytesOut = h.BytesOut,
-                bytesIn = h.BytesIn,
-                unknown = h.Unknown,
-                category = h.Category,
-            }),
+            hosts = o.Hosts.Select(Host),
         });
     }
 
@@ -193,34 +185,48 @@ public static class QueryEndpoints
         {
             session = Session(tree[0], name),
             children = tree.Skip(1).Select(s => Session(s, name)),
-            events = page.Items.Select(e => new
-            {
-                seq = e.Seq,
-                eventId = e.EventId,
-                ts = Values.Time(e.TsUs),
-                tool = e.Tool,
-                sessionId = e.SessionId,
-                pid = e.Pid,
-                processPath = e.ProcessPath,
-                category = e.Category,
-                action = e.Action,
-                target = e.Target,
-                outcome = e.Outcome,
-                sizeBytes = e.SizeBytes,
-                bytesOut = e.BytesOut,
-                bytesIn = e.BytesIn,
-                flags = e.Flags.Order(StringComparer.Ordinal),
-                count = e.Count,
-                detections = e.Detections,
-                source = e.Source,
-                severity = e.Severity is { } s ? SeverityRule.WireName(s) : null,
-                rule = e.Rule,
-            }),
+            events = page.Items.Select(e => Event(e, name)),
             next = page.Next,
         });
     }
 
-    private static object Range(TimeRange r) => new { from = Values.Time(r.FromUs), to = Values.Time(r.ToUs) };
+    /// <summary>One row as the timeline and search show it.</summary>
+    internal static object Event(EventView e, Func<string, string> name) => new
+    {
+        seq = e.Seq,
+        eventId = e.EventId,
+        ts = Values.Time(e.TsUs),
+        tool = e.Tool,
+        displayName = name(e.Tool),
+        sessionId = e.SessionId,
+        pid = e.Pid,
+        processPath = e.ProcessPath,
+        category = e.Category,
+        action = e.Action,
+        target = e.Target,
+        outcome = e.Outcome,
+        sizeBytes = e.SizeBytes,
+        bytesOut = e.BytesOut,
+        bytesIn = e.BytesIn,
+        flags = e.Flags.Order(StringComparer.Ordinal),
+        count = e.Count,
+        detections = e.Detections,
+        source = e.Source,
+        severity = e.Severity is { } s ? SeverityRule.WireName(s) : null,
+        rule = e.Rule,
+    };
+
+    internal static object Host(HostStats h) => new
+    {
+        target = h.Target,
+        flows = h.Flows,
+        bytesOut = h.BytesOut,
+        bytesIn = h.BytesIn,
+        unknown = h.Unknown,
+        category = h.Category,
+    };
+
+    internal static object Range(TimeRange r) => new { from = Values.Time(r.FromUs), to = Values.Time(r.ToUs) };
 
     private static object BySeverity(IReadOnlyDictionary<Severity, int> counts) => new
     {

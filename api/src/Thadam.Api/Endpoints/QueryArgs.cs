@@ -26,18 +26,10 @@ public static partial class Args
     public static readonly IReadOnlySet<string> Statuses = new HashSet<string>(StringComparer.Ordinal) { "open", "reviewed" };
     public static readonly IReadOnlySet<string> Severities = new HashSet<string>(StringComparer.Ordinal) { "high", "medium", "low" };
 
-    /// <summary>RFC 3339 date-time: a full date, time, optional fraction and an offset or Z.</summary>
-    [GeneratedRegex(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})$", RegexOptions.CultureInvariant)]
-    private static partial Regex Rfc3339Pattern();
-
     [GeneratedRegex(@"^[A-Za-z0-9._:-]+$", RegexOptions.CultureInvariant)]
     private static partial Regex IdPattern();
 
-    public static DateTimeOffset? Time(string? s) =>
-        s is { Length: <= 40 } && Rfc3339Pattern().IsMatch(s)
-        && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var t)
-            ? t
-            : null;
+    public static DateTimeOffset? Time(string? s) => Values.ParseTime(s);
 
     public static bool IsTime(string? s) => s is null || Time(s) is not null;
 
