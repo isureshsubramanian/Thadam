@@ -4,6 +4,7 @@
 //! code-signing identity, never by file name, because a tool's binary can be renamed on
 //! every update. Errors name the field that failed, never the value in it.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use garde::Validate;
@@ -206,6 +207,9 @@ impl HostPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkPolicy {
     pub known_hosts: Vec<HostPattern>,
+    /// `known_hosts` entries that are IP addresses. They match only rows without a host
+    /// name, by address (ADR-007 amendment 4); they never match names.
+    pub known_addresses: Vec<IpAddr>,
     pub large_upload_bytes: i64,
     pub large_upload_session_bytes: i64,
 }
@@ -214,6 +218,7 @@ impl Default for NetworkPolicy {
     fn default() -> Self {
         Self {
             known_hosts: Vec::new(),
+            known_addresses: Vec::new(),
             large_upload_bytes: DEFAULT_LARGE_UPLOAD,
             large_upload_session_bytes: DEFAULT_LARGE_UPLOAD_SESSION,
         }
@@ -221,6 +226,11 @@ impl Default for NetworkPolicy {
 }
 
 impl NetworkPolicy {
+    /// True when `ip` is one of the tool's address entries. For rows with no host name.
+    pub fn is_known_address(&self, ip: IpAddr) -> bool {
+        self.known_addresses.contains(&ip)
+    }
+
     /// True when `host` matches one of the tool's known hosts.
     pub fn is_known_host(&self, host: &str) -> bool {
         self.known_hosts.iter().any(|p| p.matches(host))
@@ -298,7 +308,13 @@ impl Registry {
                     known_hosts: network
                         .known_hosts
                         .iter()
+                        .filter(|p| p.parse::<IpAddr>().is_err())
                         .map(|p| HostPattern::parse(p))
+                        .collect(),
+                    known_addresses: network
+                        .known_hosts
+                        .iter()
+                        .filter_map(|p| p.parse::<IpAddr>().ok())
                         .collect(),
                     large_upload_bytes: network.large_upload_bytes,
                     large_upload_session_bytes: network.large_upload_session_bytes,
@@ -675,6 +691,9 @@ fn absolute_path(value: &str, _ctx: &()) -> garde::Result {
 
 /// An exact host name, or `*.` and a name of at least two labels (no bare `*`, no `*.test`).
 fn host_pattern(value: &str, _ctx: &()) -> garde::Result {
+    if value.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
     let ok = match value.strip_prefix("*.") {
         Some(suffix) => is_host_name(suffix) && suffix.contains('.'),
         None => !value.contains('*') && is_host_name(value),
@@ -683,7 +702,7 @@ fn host_pattern(value: &str, _ctx: &()) -> garde::Result {
         Ok(())
     } else {
         Err(garde::Error::new(
-            "must be a host name, or '*.' and a name with at least two labels",
+            "must be a host name, '*.' and a name with at least two labels, or an IP address",
         ))
     }
 }

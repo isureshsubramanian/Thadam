@@ -424,8 +424,9 @@ fn new_flow(
     let category = category(open.remote_ip, open.remote_port, host);
     let unknown_host = match host {
         Some(host) => !tool.network.is_known_host(host),
-        // An address alone says nothing about who is behind it, unless it is local.
-        None => !is_internal(open.remote_ip),
+        // An address alone says nothing about who is behind it, unless it is local or the
+        // registry lists that address (ADR-007 amendment 4).
+        None => !(is_internal(open.remote_ip) || tool.network.is_known_address(open.remote_ip)),
     };
     // The tree's executable, else the one the extension read, else a placeholder
     // (ADR-007 amendment 2).
@@ -895,6 +896,56 @@ mod tests {
         assert!(flagged.contains(&("other.example.test:443", true)));
         assert!(flagged.contains(&("203.0.113.9:443", true)));
         assert!(flagged.contains(&("10.0.0.9:8080", false)));
+    }
+
+    /// ADR-007 amendment 4: an address entry makes nameless rows to that address known
+    /// (DNS rows and others), never a named row; a name entry never matches a nameless row.
+    #[test]
+    fn address_entries_match_only_rows_without_a_name() {
+        let mut run = Run::new();
+        run.r = Registry::parse(
+            r#"{"version":1,"tools":[{"key":"cli_agent","match":[{"path":"/x"}],
+                "network":{"known_hosts":["203.0.113.53","2001:db8::53","api.example-agent.test"]}}]}"#,
+        )
+        .unwrap();
+        run.at(
+            0,
+            1,
+            open(300, "203.0.113.53", 53, Some("x.example.test"), Proto::Udp),
+        );
+        run.at(0, 2, open(300, "203.0.113.53", 443, None, Proto::Tcp));
+        run.at(
+            0,
+            3,
+            open(
+                300,
+                "203.0.113.53",
+                443,
+                Some("dns.example.test"),
+                Proto::Tcp,
+            ),
+        );
+        run.at(0, 4, open(300, "2001:db8::53", 443, None, Proto::Tcp));
+        run.at(0, 5, open(300, "203.0.113.7", 443, None, Proto::Tcp));
+        let rows = run.finish();
+        let flagged: Vec<_> = rows
+            .iter()
+            .map(|r| (r.target.as_str(), r.flags.contains(&Flag::UnknownHost)))
+            .collect();
+        assert!(flagged.contains(&("203.0.113.53:53", false)), "{flagged:?}");
+        assert!(
+            flagged.contains(&("203.0.113.53:443", false)),
+            "{flagged:?}"
+        );
+        assert!(
+            flagged.contains(&("dns.example.test:443", true)),
+            "{flagged:?}"
+        );
+        assert!(
+            flagged.contains(&("[2001:db8::53]:443", false)),
+            "{flagged:?}"
+        );
+        assert!(flagged.contains(&("203.0.113.7:443", true)), "{flagged:?}");
     }
 
     #[test]

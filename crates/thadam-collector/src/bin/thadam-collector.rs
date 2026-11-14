@@ -6,7 +6,7 @@
 
 use std::fs::{self, DirBuilder};
 use std::io::BufReader;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -117,7 +117,11 @@ fn cmd_check(args: &[String]) -> Result<(), Failure> {
     let registry = load_registry(Some(path))?;
     println!("OK    {} tools", registry.tools().count());
     for tool in registry.tools() {
-        println!("      {}", tool.key);
+        match tool.network.known_addresses.len() {
+            0 => println!("      {}", tool.key),
+            1 => println!("      {}  (1 address entry)", tool.key),
+            n => println!("      {}  ({n} address entries)", tool.key),
+        }
     }
     Ok(())
 }
@@ -270,8 +274,18 @@ fn cmd_install(args: &[String]) -> Result<(), Failure> {
     if me != Path::new(service::BIN) {
         let tmp = bin_dir.join("thadam-collector.tmp");
         fs::copy(&me, &tmp).map_err(root)?;
+        // As root, fs::copy clones the file with its original owner: set root explicitly,
+        // or the account that built it could replace what the daemon runs.
+        std::os::unix::fs::chown(&tmp, Some(0), Some(0)).map_err(root)?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(root)?;
         fs::rename(&tmp, service::BIN).map_err(root)?;
+    }
+    let installed = fs::metadata(service::BIN).map_err(root)?;
+    if installed.uid() != 0 || installed.mode() & 0o022 != 0 {
+        return Err(Failure::Usage(format!(
+            "not installed: {} must be owned by root and writable only by root",
+            service::BIN
+        )));
     }
     if let Some(dir) = Path::new(service::LOG).parent() {
         DirBuilder::new()
@@ -286,12 +300,29 @@ fn cmd_install(args: &[String]) -> Result<(), Failure> {
         service::plist(service::BIN, registry, store, service::LOG),
     )
     .map_err(root)?;
+    std::os::unix::fs::chown(&tmp, Some(0), Some(0)).map_err(root)?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).map_err(root)?;
     fs::rename(&tmp, service::PLIST).map_err(root)?;
 
-    // A reinstall replaces the running job; "not loaded" is not an error here.
-    launchctl(&["bootout", &format!("system/{}", service::LABEL)]);
-    if !launchctl(&["bootstrap", "system", service::PLIST]) {
+    // A reinstall replaces the running job; "not loaded" is not an error here. bootout
+    // returns before the job is gone, and bootstrap is refused until it is: wait, then retry.
+    let job = format!("system/{}", service::LABEL);
+    launchctl(&["bootout", &job]);
+    for _ in 0..40 {
+        if !launchctl(&["print", &job]) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut loaded = false;
+    for _ in 0..5 {
+        if launchctl(&["bootstrap", "system", service::PLIST]) {
+            loaded = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    if !loaded {
         return Err(Failure::Runtime("launchctl did not load the job".into()));
     }
     println!("Installed: the collector runs from boot and restarts if it stops.");
