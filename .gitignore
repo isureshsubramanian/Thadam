@@ -20,6 +20,7 @@
 /scripts/*
 !/scripts/gate.sh
 !/scripts/install-collector.sh
+!/scripts/install-hooks.sh
 !/scripts/migrate-store.sh
 !/scripts/notices.mjs
 !/scripts/notices.sh
@@ -29,6 +30,8 @@
 # Never commit data or build output, even inside allowed folders.
 target/
 bin/
+# Rust binary sources are source, not build output.
+!/crates/*/src/bin/
 obj/
 TestResults/
 node_modules/

@@ -534,11 +534,22 @@ version = "0.1.0"
 dependencies = [
  "garde",
  "regex",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "time",
  "uuid",
+]
+
+[[package]]
+name = "thadam-hook"
+version = "0.1.0"
+dependencies = [
+ "garde",
+ "serde_json",
+ "sha2",
+ "thadam-core",
 ]
 
 [[package]]

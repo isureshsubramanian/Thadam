@@ -73,14 +73,17 @@ if [[ ! -s "$names" ]]; then
 fi
 hits="$(grep -rniwF -f "$names" --exclude-dir=.build --exclude-dir=bin --exclude-dir=obj --exclude-dir=node_modules \
     --exclude-dir=dist --exclude=.name-gate.local crates/ macos/ api/ web/ scripts/ README.md Cargo.toml || true)"
-# One exception, data the language requires: in .css files, the declaration of CSS's
-# pointer-shape property with the values `pointer` or `default`. It is removed from the
-# line before the line is checked again, so any other use of a name on it still fails.
+# Two exceptions. The agent adapters (crates/thadam-hook/src/adapters/), the only place a
+# tool may be named (project rule 6, ADR-011 Decision 2). And data the language requires:
+# in .css files, the declaration of CSS's pointer-shape property with the values `pointer`
+# or `default`; it is removed from the line before the line is checked again, so any other
+# use of a name on it still fails.
 hits="$(printf '%s\n' "$hits" | perl -e '
     open my $f, "<", shift or die; chomp(my @n = grep { /\S/ } <$f>);
     my $re = join "|", map { quotemeta } @n;
     while (<STDIN>) {
         my ($file, $text) = /^([^:]+):\d+:(.*)$/ or next;
+        next if $file =~ m{^crates/thadam-hook/src/adapters/};
         $text =~ s/\b(?:c)ursor:\s*(?:pointer|default)\b//gi if $file =~ /\.css$/;
         print if $text =~ /\b(?:$re)\b/i;
     }' "$names")"

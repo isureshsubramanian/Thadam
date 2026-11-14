@@ -1,7 +1,8 @@
 //! Thadam core: the event model, the canonical encoding and hash chain that make the
 //! store tamper-evident, and the sensitive-data detectors that redact text before it is
-//! stored. This crate performs no I/O.
+//! stored, and the wire format agent hooks send. This crate performs no I/O.
 
+pub mod agent;
 pub mod catalog;
 pub mod chain;
 pub mod detect;
@@ -11,6 +12,7 @@ pub mod error;
 pub mod exec;
 pub mod model;
 
+pub use agent::{AGENT_SOCKET, AGENT_WIRE, AgentKind, AgentMessage, CallKind, Reason};
 pub use catalog::{CATALOG_DOMAIN, CatalogKind, CatalogRow, catalog_hash, encode_catalog};
 pub use chain::{GENESIS, row_hash, to_hex};
 pub use detect::{Detections, Detector, DetectorKind, Redacted, Redactor};
