@@ -304,6 +304,7 @@ mod tests {
             flags: BTreeSet::new(),
             count: 1,
             sources: BTreeSet::from([Source::Os]),
+            agent: None,
         }
     }
 

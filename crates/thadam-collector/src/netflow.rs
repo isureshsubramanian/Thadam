@@ -367,6 +367,7 @@ impl NetFlows {
                 flags,
                 count: u32::try_from(ids.len()).unwrap_or(u32::MAX),
                 sources: BTreeSet::from([Source::Network]),
+                agent: None,
             });
         }
         done

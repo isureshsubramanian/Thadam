@@ -60,11 +60,11 @@ public static partial class SearchParser
     public static readonly IReadOnlySet<string> Actions = Set(
         "read", "create", "write", "rename", "delete", "exec", "connect", "prompt");
     public static readonly IReadOnlySet<string> Outcomes = Set(
-        "allowed", "denied_by_agent", "denied_by_user", "denied_by_os", "failed");
+        "allowed", "denied_by_agent", "denied_by_user", "denied_by_os", "never_ran", "failed");
     public static readonly IReadOnlySet<string> FlagNames = Set(
-        "outside_project", "sensitive_path", "secret_pattern", "unknown_host", "large_upload", "tool_internal",
+        "outside_project", "sensitive_path", "secret_pattern", "unknown_host", "large_upload", "tool_internal", "internal",
         "rolled_up", "unconfirmed", "continued");
-    private static readonly string[] Denied = ["denied_by_agent", "denied_by_user", "denied_by_os"];
+    private static readonly string[] Denied = ["denied_by_agent", "denied_by_user", "denied_by_os", "never_ran"];
 
     [GeneratedRegex(@"^(\d{1,4})([dh])$", RegexOptions.CultureInvariant)]
     private static partial Regex SincePattern();

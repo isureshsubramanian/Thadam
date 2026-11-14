@@ -110,6 +110,7 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
         flags,
         count: 1,
         sources: BTreeSet::from([Source::Os]),
+        agent: None,
     })
 }
 

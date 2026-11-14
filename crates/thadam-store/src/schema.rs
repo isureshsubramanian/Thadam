@@ -2,13 +2,28 @@
 //! core crate's wire names, so the two cannot drift apart.
 
 use rusqlite::Connection;
-use thadam_core::{Action, Category, Outcome, WireName};
+use thadam_core::{Action, Category, Encoding, Outcome, WireName};
 
 use crate::StoreError;
 
-/// 2 since ADR-004 (`parent_session_id`, encoding v2). Version 1 files are refused, not
-/// migrated: the only v1 data was pilot test runs.
-pub const SCHEMA_VERSION: i64 = 2;
+/// The row encoding of a segment with this schema version (`user_version`). New segments are
+/// version 3 since ADR-011 (`agent_session_id`, `transcript`, encoding v3); version 2
+/// segments (ADR-004) stay as they are and are still read and verified. Version 1 files are
+/// refused, not migrated: the only v1 data was pilot test runs.
+pub fn encoding_of(version: i64) -> Result<Encoding, StoreError> {
+    match version {
+        2 => Ok(Encoding::V2),
+        3 => Ok(Encoding::V3),
+        v => Err(StoreError::SchemaVersion(v)),
+    }
+}
+
+fn version_of(encoding: Encoding) -> i64 {
+    match encoding {
+        Encoding::V2 => 2,
+        Encoding::V3 => 3,
+    }
+}
 
 fn in_list<T: WireName>(all: &[T]) -> String {
     all.iter()
@@ -17,14 +32,24 @@ fn in_list<T: WireName>(all: &[T]) -> String {
         .join(", ")
 }
 
-pub fn apply(conn: &Connection) -> Result<(), StoreError> {
+/// Creates the table in a new file with `encoding`'s schema, or returns the encoding of an
+/// existing file (which keeps its own version).
+pub fn apply(conn: &Connection, encoding: Encoding) -> Result<Encoding, StoreError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == SCHEMA_VERSION {
-        return Ok(());
-    }
     if version != 0 {
-        return Err(StoreError::SchemaVersion(version));
+        return encoding_of(version);
     }
+    // A v2 table cannot hold the outcomes added with v3.
+    let outcomes: Vec<Outcome> = Outcome::ALL
+        .iter()
+        .copied()
+        .filter(|o| encoding >= Encoding::V3 || *o != Outcome::NeverRan)
+        .collect();
+    let agent_columns = match encoding {
+        Encoding::V2 => "",
+        Encoding::V3 => "agent_session_id TEXT,\n            transcript   TEXT,",
+    };
+    let version = version_of(encoding);
     let sql = format!(
         "BEGIN;
         CREATE TABLE events (
@@ -48,6 +73,7 @@ pub fn apply(conn: &Connection) -> Result<(), StoreError> {
             count        INTEGER NOT NULL DEFAULT 1 CHECK (count >= 1),
             detections   TEXT    NOT NULL DEFAULT '',
             source       TEXT    NOT NULL,
+            {agent_columns}
             prev_hash    BLOB    NOT NULL CHECK (length(prev_hash) = 32),
             hash         BLOB    NOT NULL CHECK (length(hash) = 32)
         ) STRICT;
@@ -60,21 +86,18 @@ pub fn apply(conn: &Connection) -> Result<(), StoreError> {
             BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
         CREATE TRIGGER events_no_delete BEFORE DELETE ON events
             BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
-        PRAGMA user_version = {SCHEMA_VERSION};
+        PRAGMA user_version = {version};
         COMMIT;",
         categories = in_list(Category::ALL),
         actions = in_list(Action::ALL),
-        outcomes = in_list(Outcome::ALL),
+        outcomes = in_list(&outcomes),
     );
     conn.execute_batch(&sql)?;
-    Ok(())
+    Ok(encoding)
 }
 
-pub fn check_version(conn: &Connection) -> Result<(), StoreError> {
+/// The encoding of an existing file; refuses unknown versions.
+pub fn check_version(conn: &Connection) -> Result<Encoding, StoreError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == SCHEMA_VERSION {
-        Ok(())
-    } else {
-        Err(StoreError::SchemaVersion(version))
-    }
+    encoding_of(version)
 }

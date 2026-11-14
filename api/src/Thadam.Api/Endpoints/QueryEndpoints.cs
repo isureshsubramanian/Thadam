@@ -212,6 +212,8 @@ public static class QueryEndpoints
         count = e.Count,
         detections = e.Detections,
         source = e.Source,
+        agentSessionId = e.AgentSessionId,
+        transcript = e.Transcript,
         severity = e.Severity is { } s ? SeverityRule.WireName(s) : null,
         rule = e.Rule,
     };

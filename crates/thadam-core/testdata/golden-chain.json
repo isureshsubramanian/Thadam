@@ -24,6 +24,42 @@
       }
     ]
   },
+  "event_v3": {
+    "comment": "Segments with schema version 3 (ADR-011): v2 plus agent_session_id and transcript at the end. Hashes from an independent Python implementation.",
+    "domain": "thadam.event.v3",
+    "rows": [
+      {
+        "seq": 1, "event_id": "0193c100-0000-7000-8000-000000000001", "ts_us": 1794790000000000,
+        "tool": "tool-a", "session_id": "s-7f3e", "parent_session_id": null, "pid": 48211,
+        "process_path": "/usr/bin/git", "category": "command", "action": "exec", "target": "git status",
+        "outcome": "allowed", "size_bytes": null, "bytes_out": null, "bytes_in": null,
+        "project": "/Users/dev/projects/sample-app", "flags": "", "count": 1, "detections": "",
+        "source": "os", "agent_session_id": null, "transcript": null,
+        "hash": "ccf6862ec3127e6dfd86e78ff293ee5e5ddfa1b0025a07ab454d7560c4125066"
+      },
+      {
+        "seq": 2, "event_id": "0193c100-0000-7000-8000-000000000002", "ts_us": 1794790001000000,
+        "tool": "tool-a", "session_id": "s-7f3e", "parent_session_id": null, "pid": 48200,
+        "process_path": "/usr/local/bin/tool-a", "category": "prompt", "action": "prompt",
+        "target": "fix the failing test in [EMAIL]'s branch", "outcome": "allowed", "size_bytes": null,
+        "bytes_out": null, "bytes_in": null, "project": "/Users/dev/projects/sample-app", "flags": "",
+        "count": 1, "detections": "EMAIL:1", "source": "agent",
+        "agent_session_id": "a-51c2e9d0-0000-4000-8000-000000000001",
+        "transcript": "/Users/dev/.tool-a/sessions/a-51c2.jsonl",
+        "hash": "91cd9912a9b58ab5b3a0ea711948aba7610a4308dd549fa049f50e9e75518b94"
+      },
+      {
+        "seq": 3, "event_id": "0193c100-0000-7000-8000-000000000003", "ts_us": 1794790002000000,
+        "tool": "tool-a", "session_id": "s-7f3e", "parent_session_id": null, "pid": 48200,
+        "process_path": "/usr/local/bin/tool-a", "category": "command", "action": "exec",
+        "target": "rm -rf build/", "outcome": "never_ran", "size_bytes": null, "bytes_out": null,
+        "bytes_in": null, "project": "/Users/dev/projects/sample-app", "flags": "internal,unconfirmed",
+        "count": 1, "detections": "", "source": "agent",
+        "agent_session_id": "a-51c2e9d0-0000-4000-8000-000000000001", "transcript": "",
+        "hash": "89c714780f3510f008b0600a4a755b90ac67ae69d86ddf17fec8100d8d638d86"
+      }
+    ]
+  },
   "catalog_v1": {
     "domain": "thadam.catalog.v1",
     "rows": [

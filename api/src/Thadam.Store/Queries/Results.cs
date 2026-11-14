@@ -26,7 +26,9 @@ public sealed record EventView(
     IReadOnlyDictionary<string, long> Detections,
     string Source,
     Severity? Severity,
-    string? Rule);
+    string? Rule,
+    string? AgentSessionId = null,
+    string? Transcript = null);
 
 /// <summary>
 /// One flagged-queue item: rows grouped by (rule, target, session), so 200 reads of one

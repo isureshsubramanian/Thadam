@@ -14,13 +14,17 @@ public sealed class StoreQueries(SegmentIndex index)
     private const int MaxListed = 100;
     private const int MaxSessionTree = 1000;
 
-    internal const string Columns = """
+    private const string BaseColumns = """
         seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path, category, action,
         target, outcome, size_bytes, bytes_out, bytes_in, project, flags, count, detections, source
         """;
 
+    internal static string Columns(int version) => BaseColumns + (version == 3
+        ? ", agent_session_id, transcript"
+        : ", NULL AS agent_session_id, NULL AS transcript");
+
     internal const string FlaggedCondition =
-        "(flags != '' OR detections != '' OR outcome IN ('denied_by_agent', 'denied_by_user', 'denied_by_os'))";
+        "(flags != '' OR detections != '' OR outcome IN ('denied_by_agent', 'denied_by_user', 'denied_by_os', 'never_ran'))";
 
     public SegmentIndex Index => index;
 
@@ -221,13 +225,13 @@ public sealed class StoreQueries(SegmentIndex index)
         {
             return new Page<EventView>(rows, null);
         }
-        var internalClause = includeInternal ? "" : " AND instr(',' || flags || ',', ',tool_internal,') = 0";
+        var internalClause = includeInternal ? "" : " AND instr(',' || flags || ',', ',tool_internal,') = 0 AND instr(',' || flags || ',', ',internal,') = 0";
         foreach (var span in (await index.ListAsync(ct).ConfigureAwait(false)).OrderBy(s => s.FirstSeq))
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = $"""
-                SELECT {Columns} FROM events
+                SELECT {Columns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false))} FROM events
                 WHERE session_id IN ({InList(sessionIds.Count)}) AND seq > $after{internalClause}
                 ORDER BY seq LIMIT $limit
                 """;
@@ -257,7 +261,7 @@ public sealed class StoreQueries(SegmentIndex index)
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT {Columns} FROM events WHERE event_id = $id";
+            cmd.CommandText = $"SELECT {Columns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false))} FROM events WHERE event_id = $id";
             cmd.Parameters.AddWithValue("$id", eventId);
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             if (await r.ReadAsync(ct).ConfigureAwait(false))
@@ -352,7 +356,7 @@ public sealed class StoreQueries(SegmentIndex index)
         var c = SeverityRule.Classify(flags, row.Outcome, row.Action, row.Detections);
         return new EventView(row.Seq, row.EventId, row.TsUs, row.Tool, row.SessionId, row.ParentSessionId, row.Pid,
             row.ProcessPath, row.Category, row.Action, row.Target, row.Outcome, row.SizeBytes, row.BytesOut, row.BytesIn,
-            row.Project, flags, row.Count, Values.Detections(row.Detections), row.Source, c?.Severity, c?.Rule);
+            row.Project, flags, row.Count, Values.Detections(row.Detections), row.Source, c?.Severity, c?.Rule, row.AgentSessionId, row.Transcript);
     }
 
     private sealed class ToolAcc

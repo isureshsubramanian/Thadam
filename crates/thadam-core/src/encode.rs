@@ -1,10 +1,12 @@
-//! Canonical encoding `thadam.event.v2` (ADR-002 Decision 2; ADR-004 added
-//! `parent_session_id` and retired v1).
+//! Canonical encodings `thadam.event.v2` (ADR-002 Decision 2; ADR-004 added
+//! `parent_session_id` and retired v1) and `thadam.event.v3` (ADR-011 Decision 5: v2 plus
+//! `agent_session_id` and `transcript` at the end).
 //!
 //! CONTRACT: these bytes are hashed into the chain. Any reader that verifies the chain
-//! (the store's `verify`, and the .NET API in phase 3) must produce the identical bytes,
+//! (the store's `verify`, and the .NET API's `Chain.cs`) must produce the identical bytes,
 //! so the field order, the wire names in `model.rs` and the rules below cannot change
-//! without a new domain tag. The golden vectors in this module's tests pin them.
+//! without a new domain tag. The golden vectors in `testdata/golden-chain.json` pin them.
+//! A segment's schema version says which encoding its rows use (v2 segments stay v2).
 //!
 //! - text: u32 big-endian byte length, then the UTF-8 bytes as stored
 //! - null: u32 big-endian 0xFFFF_FFFF (never a valid text length: lengths are capped)
@@ -13,8 +15,21 @@
 
 use crate::error::CoreError;
 
-pub const EVENT_DOMAIN: &str = "thadam.event.v2";
+pub const EVENT_DOMAIN_V2: &str = "thadam.event.v2";
+pub const EVENT_DOMAIN_V3: &str = "thadam.event.v3";
 const NULL_MARKER: u32 = u32::MAX;
+
+/// Which canonical encoding a row is hashed with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Encoding {
+    V2,
+    V3,
+}
+
+impl Encoding {
+    /// The encoding new rows are written with.
+    pub const CURRENT: Encoding = Encoding::V3;
+}
 
 /// A stored event row in the primitive form that is hashed. The store reads rows back in
 /// this form, so verification never depends on parsing the values into enums.
@@ -41,12 +56,26 @@ pub struct CanonicalRow {
     pub count: i64,
     pub detections: String,
     pub source: String,
+    /// The tool's own session ID (v3 only; agent rows).
+    pub agent_session_id: Option<String>,
+    /// The tool's transcript file (v3 only; agent rows).
+    pub transcript: Option<String>,
 }
 
-/// Encodes a row in the field order fixed by ADR-002 and ADR-004.
-pub fn encode(row: &CanonicalRow) -> Result<Vec<u8>, CoreError> {
+/// Encodes a row in the field order fixed by ADR-002, ADR-004 and ADR-011. A row with an
+/// agent field set cannot be encoded as v2: the field would silently drop out of the hash.
+pub fn encode(row: &CanonicalRow, encoding: Encoding) -> Result<Vec<u8>, CoreError> {
+    if encoding == Encoding::V2 && (row.agent_session_id.is_some() || row.transcript.is_some()) {
+        return Err(CoreError::NotInEncoding);
+    }
     let mut buf = Vec::with_capacity(256 + row.target.len() + row.process_path.len());
-    put_text(&mut buf, EVENT_DOMAIN)?;
+    put_text(
+        &mut buf,
+        match encoding {
+            Encoding::V2 => EVENT_DOMAIN_V2,
+            Encoding::V3 => EVENT_DOMAIN_V3,
+        },
+    )?;
     put_int(&mut buf, row.seq);
     put_text(&mut buf, &row.event_id)?;
     put_int(&mut buf, row.ts_us);
@@ -67,6 +96,10 @@ pub fn encode(row: &CanonicalRow) -> Result<Vec<u8>, CoreError> {
     put_int(&mut buf, row.count);
     put_text(&mut buf, &row.detections)?;
     put_text(&mut buf, &row.source)?;
+    if encoding == Encoding::V3 {
+        put_opt_text(&mut buf, row.agent_session_id.as_deref())?;
+        put_opt_text(&mut buf, row.transcript.as_deref())?;
+    }
     Ok(buf)
 }
 
@@ -131,6 +164,8 @@ mod tests {
             count: 1,
             detections: "SECRET:1".into(),
             source: "os".into(),
+            agent_session_id: None,
+            transcript: None,
         };
         let r2 = CanonicalRow {
             seq: 2,
@@ -153,6 +188,8 @@ mod tests {
             count: 418,
             detections: String::new(),
             source: "agent,os".into(),
+            agent_session_id: None,
+            transcript: None,
         };
         (r1, r2)
     }
@@ -160,12 +197,12 @@ mod tests {
     #[test]
     fn golden_vectors_match_independent_implementation() {
         let (r1, r2) = golden_rows();
-        let h1 = row_hash(&GENESIS, &r1).unwrap();
+        let h1 = row_hash(&GENESIS, &r1, Encoding::V2).unwrap();
         assert_eq!(
             to_hex(&h1),
             "cca2e7aa25a5885bf7340e0e111749dad90bb3727401a46090aea3ec6598ba92"
         );
-        let h2 = row_hash(&h1, &r2).unwrap();
+        let h2 = row_hash(&h1, &r2, Encoding::V2).unwrap();
         assert_eq!(
             to_hex(&h2),
             "ba2352eb629780821ce40c27aa8421ed957e981ce340ba70c60fbb19aae0d586"
@@ -178,18 +215,40 @@ mod tests {
         let mut b = a.clone();
         a.project = None;
         b.project = Some(String::new());
-        assert_ne!(encode(&a).unwrap(), encode(&b).unwrap());
+        assert_ne!(
+            encode(&a, Encoding::V2).unwrap(),
+            encode(&b, Encoding::V2).unwrap()
+        );
         let (mut c, _) = golden_rows();
         let mut d = c.clone();
         c.parent_session_id = None;
         d.parent_session_id = Some(String::new());
-        assert_ne!(encode(&c).unwrap(), encode(&d).unwrap());
+        assert_ne!(
+            encode(&c, Encoding::V2).unwrap(),
+            encode(&d, Encoding::V2).unwrap()
+        );
+    }
+
+    #[test]
+    fn agent_fields_need_v3_and_change_only_the_v3_bytes() {
+        let (mut row, _) = golden_rows();
+        // Without agent fields, v3 is v2 plus two null markers (the domains are the same
+        // length).
+        let v2 = encode(&row, Encoding::V2).unwrap();
+        let v3 = encode(&row, Encoding::V3).unwrap();
+        assert_eq!(v3.len(), v2.len() + 8);
+        row.transcript = Some("/t".into());
+        assert!(matches!(
+            encode(&row, Encoding::V2),
+            Err(CoreError::NotInEncoding)
+        ));
+        assert!(encode(&row, Encoding::V3).is_ok());
     }
 
     #[test]
     fn every_field_change_changes_the_hash() {
         let (base, _) = golden_rows();
-        let h = row_hash(&GENESIS, &base).unwrap();
+        let h = row_hash(&GENESIS, &base, Encoding::V3).unwrap();
         let mut variants = Vec::new();
         let mut v = base.clone();
         v.seq = 2;
@@ -209,9 +268,18 @@ mod tests {
         let mut v = base.clone();
         v.parent_session_id = Some("s-0000".into());
         variants.push(v);
+        let mut v = base.clone();
+        v.agent_session_id = Some("a-0000".into());
+        variants.push(v);
+        let mut v = base.clone();
+        v.transcript = Some("/t".into());
+        variants.push(v);
+        let mut v = base.clone();
+        v.transcript = Some(String::new());
+        variants.push(v);
         for v in variants {
-            assert_ne!(row_hash(&GENESIS, &v).unwrap(), h);
+            assert_ne!(row_hash(&GENESIS, &v, Encoding::V3).unwrap(), h);
         }
-        assert_ne!(row_hash(&[1u8; 32], &base).unwrap(), h);
+        assert_ne!(row_hash(&[1u8; 32], &base, Encoding::V3).unwrap(), h);
     }
 }

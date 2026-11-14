@@ -160,6 +160,7 @@ mod tests {
             flags: flags.iter().copied().collect(),
             count: 1,
             sources: BTreeSet::from([Source::Os]),
+            agent: None,
         }
     }
 

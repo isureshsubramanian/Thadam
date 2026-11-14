@@ -138,7 +138,7 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
     private static async Task ReadPageAsync(SqliteConnection conn, Where where, long below, List<EventView> rows, CancellationToken ct)
     {
         await using var cmd = where.Command(conn,
-            $"SELECT {StoreQueries.Columns} FROM events WHERE {{where}} AND seq < $below ORDER BY seq DESC LIMIT $limit");
+            $"SELECT {StoreQueries.Columns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false))} FROM events WHERE {{where}} AND seq < $below ORDER BY seq DESC LIMIT $limit");
         cmd.Parameters.AddWithValue("$below", below);
         cmd.Parameters.AddWithValue("$limit", StoreQueries.PageSize + 1 - rows.Count);
         await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);

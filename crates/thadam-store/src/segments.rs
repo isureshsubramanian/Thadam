@@ -15,7 +15,7 @@ use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use thadam_core::{CatalogKind, CatalogRow, EventRecord, to_hex};
+use thadam_core::{CatalogKind, CatalogRow, Encoding, EventRecord, to_hex};
 use time::OffsetDateTime;
 
 use crate::catalog::{Catalog, CatalogEntry};
@@ -225,7 +225,9 @@ impl SegmentWriter {
         let roll = match &self.active {
             None => true,
             // A row older than the active week stays in the active segment (ADR-009 Risks).
-            Some(a) => week > a.week,
+            // A segment from before an encoding upgrade is closed and a new one opened in
+            // the same week (`events-YYYY-Www-2.db`): old files are never altered (ADR-011).
+            Some(a) => week > a.week || a.store.encoding() < Encoding::CURRENT,
         };
         if roll {
             self.close_active(now_us)?;

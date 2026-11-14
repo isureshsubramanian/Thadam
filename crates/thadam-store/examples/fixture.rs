@@ -161,6 +161,7 @@ fn main() {
             flags: r.flags.iter().copied().collect::<BTreeSet<_>>(),
             count: r.count,
             sources: BTreeSet::from([Source::Os]),
+            agent: None,
         };
         let record = EventRecord::new(event, &redactor).unwrap();
         let at = record.ts_us();

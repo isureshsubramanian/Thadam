@@ -6,7 +6,8 @@
 
 use serde_json::Value;
 use thadam_core::{
-    CATALOG_DOMAIN, CanonicalRow, CatalogRow, GENESIS, catalog_hash, encode::EVENT_DOMAIN,
+    CATALOG_DOMAIN, CanonicalRow, CatalogRow, Encoding, GENESIS, catalog_hash,
+    encode::{EVENT_DOMAIN_V2, EVENT_DOMAIN_V3},
     row_hash, to_hex,
 };
 
@@ -30,12 +31,11 @@ fn opt_int(v: &Value, k: &str) -> Option<i64> {
     v[k].as_i64()
 }
 
-#[test]
-fn event_vectors_match() {
+fn event_vectors(key: &str, domain: &str, encoding: Encoding) {
     let f = file();
-    assert_eq!(f["event_v2"]["domain"], EVENT_DOMAIN);
+    assert_eq!(f[key]["domain"], domain);
     let mut prev = GENESIS;
-    for v in f["event_v2"]["rows"].as_array().unwrap() {
+    for v in f[key]["rows"].as_array().unwrap() {
         let row = CanonicalRow {
             seq: int(v, "seq"),
             event_id: text(v, "event_id"),
@@ -57,11 +57,24 @@ fn event_vectors_match() {
             count: int(v, "count"),
             detections: text(v, "detections"),
             source: text(v, "source"),
+            // Absent from v2 vectors: null.
+            agent_session_id: opt_text(v, "agent_session_id"),
+            transcript: opt_text(v, "transcript"),
         };
-        let h = row_hash(&prev, &row).unwrap();
+        let h = row_hash(&prev, &row, encoding).unwrap();
         assert_eq!(to_hex(&h), text(v, "hash"));
         prev = h;
     }
+}
+
+#[test]
+fn event_v2_vectors_match() {
+    event_vectors("event_v2", EVENT_DOMAIN_V2, Encoding::V2);
+}
+
+#[test]
+fn event_v3_vectors_match() {
+    event_vectors("event_v3", EVENT_DOMAIN_V3, Encoding::V3);
 }
 
 #[test]

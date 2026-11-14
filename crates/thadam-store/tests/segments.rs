@@ -10,10 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
-use thadam_core::{Action, Category, EventRecord, NewEvent, Outcome, Redactor, Source};
+use thadam_core::{
+    Action, AgentLink, Category, CoreError, Encoding, EventRecord, NewEvent, Outcome, Redactor,
+    Source,
+};
 use thadam_store::{
-    CATALOG_FILE, DirBreak, DiskSpace, Limits, SegmentWriter, Store, StoreError, Written, migrate,
-    verify_dir,
+    CATALOG_FILE, ChainBreak, ChainStart, DirBreak, DiskSpace, Limits, SegmentWriter, Store,
+    StoreError, Written, migrate, verify_dir,
 };
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -88,6 +91,39 @@ fn record(ts: OffsetDateTime, i: usize) -> EventRecord {
             flags: BTreeSet::new(),
             count: 1,
             sources: BTreeSet::from([Source::Os]),
+            agent: None,
+        },
+        &redactor,
+    )
+    .unwrap()
+}
+
+/// A row the tool reported itself, as the agent adapters write it (ADR-011).
+fn agent_record(ts: OffsetDateTime, outcome: Outcome) -> EventRecord {
+    let redactor = Redactor::with_default_detectors().unwrap();
+    EventRecord::new(
+        NewEvent {
+            ts,
+            tool: "tool-a".into(),
+            session_id: Some("s-7f3e".into()),
+            parent_session_id: None,
+            pid: 48200,
+            process_path: "/usr/local/bin/tool-a".into(),
+            category: Category::Command,
+            action: Action::Exec,
+            target: "rm -rf build/".into(),
+            outcome,
+            size_bytes: None,
+            bytes_out: None,
+            bytes_in: None,
+            project: Some("/Users/dev/projects/sample-app".into()),
+            flags: BTreeSet::new(),
+            count: 1,
+            sources: BTreeSet::from([Source::Agent]),
+            agent: Some(AgentLink {
+                session_id: "a-51c2e9d0".into(),
+                transcript: Some("/Users/dev/.tool-a/sessions/a-51c2.jsonl".into()),
+            }),
         },
         &redactor,
     )
@@ -620,4 +656,115 @@ fn a_stopped_store_verifies_from_a_folder_the_reader_cannot_write() {
     let report = report.unwrap();
     assert_eq!(report.broken, None);
     assert_eq!(report.verified_rows, 8);
+}
+
+/// A folder whose active segment was written before encoding v3: `n` rows in a v2 file.
+fn folder_with_active_v2_segment(tmp: &TempDir, t: OffsetDateTime, n: usize) {
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &[t], 1);
+    drop(w);
+    // Rebuild the active file as an older writer left it: same start, v2 schema.
+    let path = tmp.store().join("events-2026-W46.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let mut old = Store::open_segment_with(&path, ChainStart::GENESIS, Encoding::V2).unwrap();
+    for i in 0..n {
+        old.append(&record(t, i)).unwrap();
+    }
+    old.leave_wal().unwrap();
+}
+
+#[test]
+fn an_active_v2_segment_is_closed_and_v3_continues_the_chain_in_the_same_week() {
+    let tmp = TempDir::new("v2-to-v3");
+    let t = datetime!(2026-11-12 10:00 UTC);
+    folder_with_active_v2_segment(&tmp, t, 3);
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &[t], 1);
+    w.append(&agent_record(t, Outcome::NeverRan), us(t))
+        .unwrap();
+    drop(w);
+    assert_eq!(
+        segment_files(&tmp.store()),
+        ["events-2026-W46-2.db", "events-2026-W46.db"]
+    );
+    let report = verify_dir(tmp.store()).unwrap();
+    assert_eq!(report.broken, None);
+    assert_eq!(report.verified_rows, 5);
+    // The old file is untouched: still v2, three rows.
+    let old = Store::open_read_only(tmp.store().join("events-2026-W46.db")).unwrap();
+    assert_eq!(old.encoding(), Encoding::V2);
+    assert_eq!(old.rows().unwrap(), 3);
+    // The agent fields round-trip in the new one, and never_ran carries unconfirmed.
+    let new = Store::open_read_only(tmp.store().join("events-2026-W46-2.db")).unwrap();
+    assert_eq!(new.encoding(), Encoding::V3);
+    let (seq, agent, transcript, outcome, flags): (i64, String, String, String, String) = new
+        .connection()
+        .query_row(
+            "SELECT seq, agent_session_id, transcript, outcome, flags FROM events
+             WHERE agent_session_id IS NOT NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(seq, 5);
+    assert_eq!(agent, "a-51c2e9d0");
+    assert_eq!(transcript, "/Users/dev/.tool-a/sessions/a-51c2.jsonl");
+    assert_eq!(outcome, "never_ran");
+    assert_eq!(flags, "unconfirmed");
+}
+
+#[test]
+fn an_edited_transcript_in_a_v3_segment_is_a_break() {
+    let tmp = TempDir::new("v3-tamper");
+    let t = datetime!(2026-11-12 10:00 UTC);
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &[t], 1);
+    w.append(&agent_record(t, Outcome::DeniedByUser), us(t))
+        .unwrap();
+    drop(w);
+    let conn = Connection::open(tmp.store().join("events-2026-W46.db")).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER events_no_update; UPDATE events SET transcript = '/tmp/other' WHERE seq = 2;",
+    )
+    .unwrap();
+    drop(conn);
+    let broken = verify_dir(tmp.store()).unwrap().broken;
+    assert!(
+        matches!(
+            &broken,
+            Some(DirBreak::Segment {
+                reason: ChainBreak::HashMismatch { seq: 2, .. },
+                ..
+            })
+        ),
+        "{broken:?}"
+    );
+}
+
+#[test]
+fn a_v2_file_refuses_rows_it_cannot_hold() {
+    let tmp = TempDir::new("v2-refuses");
+    let t = datetime!(2026-11-12 10:00 UTC);
+    let path = tmp.0.join("old.db");
+    let mut old = Store::open_segment_with(&path, ChainStart::GENESIS, Encoding::V2).unwrap();
+    assert!(matches!(
+        old.append(&agent_record(t, Outcome::DeniedByUser)),
+        Err(StoreError::Core(CoreError::NotInEncoding))
+    ));
+    // Nothing was written by the refused row.
+    assert_eq!(old.rows().unwrap(), 0);
+    old.append(&record(t, 0)).unwrap();
+    assert!(old.verify().unwrap().is_ok());
+    // never_ran is not in a v2 table's allowed outcomes.
+    let conn = old.connection();
+    let err = conn.execute(
+        "INSERT INTO events (seq, event_id, ts_us, tool, pid, process_path, category, action,
+            target, outcome, source, prev_hash, hash)
+         VALUES (9, 'e', 1, 't', 1, '/p', 'command', 'exec', 'x', 'never_ran', 'agent',
+            zeroblob(32), zeroblob(32))",
+        [],
+    );
+    assert!(err.is_err());
 }

@@ -12,8 +12,9 @@ mod segments;
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
-use thadam_core::{CanonicalRow, CoreError, EventRecord, GENESIS, row_hash, to_hex};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params_from_iter};
+use thadam_core::{CanonicalRow, CoreError, Encoding, EventRecord, GENESIS, row_hash, to_hex};
 use thiserror::Error;
 
 pub use catalog::{Catalog, CatalogEntry, CatalogReport};
@@ -72,6 +73,8 @@ pub struct Store {
     /// Where this file's part of the chain starts. Seq 1 and the zero hash for a whole
     /// store; the previous segment's end for a segment (ADR-009 Decision 1).
     start: ChainStart,
+    /// The file's row encoding, from its schema version. Fixed for the file's lifetime.
+    encoding: Encoding,
 }
 
 /// Position of a row in the chain after it was appended.
@@ -137,12 +140,33 @@ impl Store {
     }
 
     /// Opens or creates a store whose first row continues a chain at `start`.
+    /// A new file gets the current schema; an existing one keeps its own.
     pub fn open_segment(path: impl AsRef<Path>, start: ChainStart) -> Result<Self, StoreError> {
+        Self::open_segment_with(path, start, Encoding::CURRENT)
+    }
+
+    /// As `open_segment`, creating a new file with `encoding`'s schema. Older encodings are
+    /// for tests that build mixed-version folders; the writer only creates current ones.
+    #[doc(hidden)]
+    pub fn open_segment_with(
+        path: impl AsRef<Path>,
+        start: ChainStart,
+        encoding: Encoding,
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        schema::apply(&conn)?;
-        Ok(Self { conn, start })
+        let encoding = schema::apply(&conn, encoding)?;
+        Ok(Self {
+            conn,
+            start,
+            encoding,
+        })
+    }
+
+    /// The row encoding of this file.
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
     }
 
     /// Switches the file from WAL to the rollback journal before the writer closes it.
@@ -162,8 +186,12 @@ impl Store {
         start: ChainStart,
     ) -> Result<Self, StoreError> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        schema::check_version(&conn)?;
-        Ok(Self { conn, start })
+        let encoding = schema::check_version(&conn)?;
+        Ok(Self {
+            conn,
+            start,
+            encoding,
+        })
     }
 
     /// The first row, if any: its seq, `prev_hash` and time.
@@ -230,37 +258,44 @@ impl Store {
             ),
         };
         let row = record.to_row(seq);
-        let hash = row_hash(&prev_hash, &row)?;
+        // Fails for a v2 file and a row with agent fields: they would not be in the hash.
+        let hash = row_hash(&prev_hash, &row, self.encoding)?;
+        let mut values: Vec<Value> = vec![
+            row.seq.into(),
+            row.event_id.into(),
+            row.ts_us.into(),
+            row.tool.into(),
+            row.session_id.into(),
+            row.parent_session_id.into(),
+            row.pid.into(),
+            row.process_path.into(),
+            row.category.into(),
+            row.action.into(),
+            row.target.into(),
+            row.outcome.into(),
+            row.size_bytes.into(),
+            row.bytes_out.into(),
+            row.bytes_in.into(),
+            row.project.into(),
+            row.flags.into(),
+            row.count.into(),
+            row.detections.into(),
+            row.source.into(),
+            prev_hash.to_vec().into(),
+            hash.to_vec().into(),
+        ];
+        if self.encoding >= Encoding::V3 {
+            values.push(row.agent_session_id.into());
+            values.push(row.transcript.into());
+        }
+        let columns = columns(self.encoding);
+        let marks = (1..=values.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         tx.execute(
-            "INSERT INTO events (seq, event_id, ts_us, tool, session_id, parent_session_id, pid,
-                process_path, category, action, target, outcome, size_bytes, bytes_out, bytes_in,
-                project, flags, count, detections, source, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22)",
-            params![
-                row.seq,
-                row.event_id,
-                row.ts_us,
-                row.tool,
-                row.session_id,
-                row.parent_session_id,
-                row.pid,
-                row.process_path,
-                row.category,
-                row.action,
-                row.target,
-                row.outcome,
-                row.size_bytes,
-                row.bytes_out,
-                row.bytes_in,
-                row.project,
-                row.flags,
-                row.count,
-                row.detections,
-                row.source,
-                prev_hash.as_slice(),
-                hash.as_slice(),
-            ],
+            &format!("INSERT INTO events ({columns}) VALUES ({marks})"),
+            params_from_iter(values),
         )?;
         tx.commit()?;
         Ok(Appended { seq, hash })
@@ -272,12 +307,10 @@ impl Store {
             .conn
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
         let total = u64::try_from(total).unwrap_or(0);
-        let mut stmt = self.conn.prepare(
-            "SELECT seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path,
-                category, action, target, outcome, size_bytes, bytes_out, bytes_in, project, flags,
-                count, detections, source, prev_hash, hash
-             FROM events ORDER BY seq",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM events ORDER BY seq",
+            columns(self.encoding)
+        ))?;
         let mut rows = stmt.query([])?;
 
         let mut expected_seq: i64 = self.start.seq;
@@ -295,7 +328,7 @@ impl Store {
                     },
                 ));
             }
-            let Some((row, stored_prev, stored_hash)) = read_row(r) else {
+            let Some((row, stored_prev, stored_hash)) = read_row(r, self.encoding) else {
                 return Ok(broken(verified, total, ChainBreak::Unreadable { seq }));
             };
             if stored_prev != prev {
@@ -305,7 +338,7 @@ impl Store {
                     ChainBreak::PrevHashMismatch { seq },
                 ));
             }
-            let computed = row_hash(&prev, &row)?;
+            let computed = row_hash(&prev, &row, self.encoding)?;
             if computed != stored_hash {
                 return Ok(broken(
                     verified,
@@ -343,13 +376,30 @@ fn broken(verified: u64, total: u64, reason: ChainBreak) -> VerifyReport {
     }
 }
 
+/// The stored columns of a file with `encoding`, in the order `read_row` reads them.
+fn columns(encoding: Encoding) -> &'static str {
+    match encoding {
+        Encoding::V2 => {
+            "seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path, \
+             category, action, target, outcome, size_bytes, bytes_out, bytes_in, project, flags, \
+             count, detections, source, prev_hash, hash"
+        }
+        Encoding::V3 => {
+            "seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path, \
+             category, action, target, outcome, size_bytes, bytes_out, bytes_in, project, flags, \
+             count, detections, source, prev_hash, hash, agent_session_id, transcript"
+        }
+    }
+}
+
 fn to_array(bytes: &[u8]) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes).ok()
 }
 
 /// Reads a row in canonical form. Any type mismatch (for example text replaced by a blob)
 /// makes the row unreadable rather than an error, so verify can report where it broke.
-fn read_row(r: &Row<'_>) -> Option<(CanonicalRow, [u8; 32], [u8; 32])> {
+fn read_row(r: &Row<'_>, encoding: Encoding) -> Option<(CanonicalRow, [u8; 32], [u8; 32])> {
+    let v3 = encoding >= Encoding::V3;
     let row = CanonicalRow {
         seq: r.get(0).ok()?,
         event_id: r.get(1).ok()?,
@@ -371,6 +421,8 @@ fn read_row(r: &Row<'_>) -> Option<(CanonicalRow, [u8; 32], [u8; 32])> {
         count: r.get(17).ok()?,
         detections: r.get(18).ok()?,
         source: r.get(19).ok()?,
+        agent_session_id: if v3 { r.get(22).ok()? } else { None },
+        transcript: if v3 { r.get(23).ok()? } else { None },
     };
     let prev: Vec<u8> = r.get(20).ok()?;
     let hash: Vec<u8> = r.get(21).ok()?;

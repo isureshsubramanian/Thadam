@@ -36,7 +36,7 @@ public static class SeverityRule
         {
             return (Severity.High, "large_upload_unknown_host");
         }
-        if (outcome is "denied_by_user" or "denied_by_agent")
+        if (outcome is "denied_by_user" or "denied_by_agent" or "never_ran")
         {
             return (Severity.Medium, "denied");
         }

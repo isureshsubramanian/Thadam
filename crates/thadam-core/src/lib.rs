@@ -14,7 +14,9 @@ pub mod model;
 pub use catalog::{CATALOG_DOMAIN, CatalogKind, CatalogRow, catalog_hash, encode_catalog};
 pub use chain::{GENESIS, row_hash, to_hex};
 pub use detect::{Detections, Detector, DetectorKind, Redacted, Redactor};
-pub use encode::{CanonicalRow, encode};
+pub use encode::{CanonicalRow, Encoding, encode};
 pub use error::CoreError;
 pub use exec::ExecObservation;
-pub use model::{Action, Category, EventRecord, Flag, NewEvent, Outcome, Source, WireName};
+pub use model::{
+    Action, AgentLink, Category, EventRecord, Flag, NewEvent, Outcome, Source, WireName,
+};

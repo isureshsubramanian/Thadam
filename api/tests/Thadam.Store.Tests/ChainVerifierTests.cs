@@ -41,6 +41,9 @@ public sealed class ChainVerifierTests(StoreFixture fixture)
         var active = Path.Combine(dir, "events-2026-W47.db");
         using (var c = Writable(active))
         {
+            using var schema = c.CreateCommand();
+            schema.CommandText = "PRAGMA user_version";
+            var version = checked((int)(long)(await schema.ExecuteScalarAsync(Ct))!);
             using var last = c.CreateCommand();
             last.CommandText = "SELECT seq, hash FROM events ORDER BY seq DESC LIMIT 1";
             using var r = last.ExecuteReader();
@@ -72,7 +75,7 @@ public sealed class ChainVerifierTests(StoreFixture fixture)
             ins.Parameters.AddWithValue("$size", row.SizeBytes);
             ins.Parameters.AddWithValue("$proj", row.Project);
             ins.Parameters.AddWithValue("$prev", prev);
-            ins.Parameters.AddWithValue("$hash", Chain.EventHash(prev, row));
+            ins.Parameters.AddWithValue("$hash", Chain.EventHash(prev, row, version));
             ins.ExecuteNonQuery();
         }
         var after = await verifier.VerifyAsync(Ct);

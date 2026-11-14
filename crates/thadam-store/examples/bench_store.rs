@@ -137,6 +137,7 @@ fn main() {
             flags,
             count: 1,
             sources: BTreeSet::from([Source::Os]),
+            agent: None,
         };
         let record = EventRecord::new(event, &redactor).unwrap();
         let at = record.ts_us();

@@ -159,10 +159,9 @@ public sealed class ChainVerifier(StoreFolder folder)
         await using (conn.ConfigureAwait(false))
         {
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                SELECT seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path,
-                       category, action, target, outcome, size_bytes, bytes_out, bytes_in, project,
-                       flags, count, detections, source, prev_hash, hash
+            var version = await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false);
+            cmd.CommandText = $"""
+                SELECT {Queries.StoreQueries.Columns(version)}, prev_hash, hash
                 FROM events WHERE seq >= $from ORDER BY seq
                 """;
             // Rows before the start would show as a gap: read from the start on the first walk.
@@ -181,8 +180,8 @@ public sealed class ChainVerifier(StoreFolder folder)
                 try
                 {
                     row = ReadRow(r);
-                    storedPrev = r.GetFieldValue<byte[]>(20);
-                    stored = r.GetFieldValue<byte[]>(21);
+                    storedPrev = r.GetFieldValue<byte[]>(22);
+                    stored = r.GetFieldValue<byte[]>(23);
                 }
                 catch (Exception e) when (e is InvalidCastException or SqliteException)
                 {
@@ -192,7 +191,7 @@ public sealed class ChainVerifier(StoreFolder folder)
                 {
                     return new ChainBreak(ChainBreakKind.PrevHash, seg.Name, seq);
                 }
-                if (!Chain.EventHash(p.PrevHash, row).AsSpan().SequenceEqual(stored))
+                if (!Chain.EventHash(p.PrevHash, row, version).AsSpan().SequenceEqual(stored))
                 {
                     return new ChainBreak(ChainBreakKind.Hash, seg.Name, seq);
                 }
@@ -209,7 +208,7 @@ public sealed class ChainVerifier(StoreFolder folder)
         StoreFolder.Text(r, 5), r.GetInt64(6), r.GetString(7), r.GetString(8), r.GetString(9),
         r.GetString(10), r.GetString(11), StoreFolder.Int(r, 12), StoreFolder.Int(r, 13),
         StoreFolder.Int(r, 14), StoreFolder.Text(r, 15), r.GetString(16), r.GetInt64(17),
-        r.GetString(18), r.GetString(19));
+        r.GetString(18), r.GetString(19), StoreFolder.Text(r, 20), StoreFolder.Text(r, 21));
 
     private sealed class Progress(long nextSeq, byte[] prevHash)
     {

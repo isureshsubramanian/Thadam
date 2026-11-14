@@ -2,17 +2,21 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::encode::{CanonicalRow, encode};
+use crate::encode::{CanonicalRow, Encoding, encode};
 use crate::error::CoreError;
 
 /// The previous-hash value used for the first row of a chain.
 pub const GENESIS: [u8; 32] = [0u8; 32];
 
 /// Computes a row's hash from the previous row's hash and the row's canonical encoding.
-pub fn row_hash(prev_hash: &[u8; 32], row: &CanonicalRow) -> Result<[u8; 32], CoreError> {
+pub fn row_hash(
+    prev_hash: &[u8; 32],
+    row: &CanonicalRow,
+    encoding: Encoding,
+) -> Result<[u8; 32], CoreError> {
     let mut hasher = Sha256::new();
     hasher.update(prev_hash);
-    hasher.update(encode(row)?);
+    hasher.update(encode(row, encoding)?);
     Ok(hasher.finalize().into())
 }
 

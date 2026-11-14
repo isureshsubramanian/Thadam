@@ -21,7 +21,9 @@ public sealed record EventRow(
     string Flags,
     long Count,
     string Detections,
-    string Source);
+    string Source,
+    string? AgentSessionId = null,
+    string? Transcript = null);
 
 /// <summary>One catalog entry (ADR-009 Decision 1). Kinds: opened, closed, retired, archived, paused.</summary>
 public sealed record CatalogEntry(

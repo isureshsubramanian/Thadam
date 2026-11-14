@@ -10,6 +10,8 @@ pub enum CoreError {
     TimestampOutOfRange,
     #[error("text field too long to encode")]
     FieldTooLong,
+    #[error("row has fields its encoding version cannot hold")]
+    NotInEncoding,
     #[error("detector pattern failed to compile: {0}")]
     Pattern(#[from] regex::Error),
 }

@@ -16,11 +16,13 @@ public sealed class GoldenVectorTests
 
     private static long? L(JsonElement e, string k) => e.GetProperty(k).ValueKind == JsonValueKind.Null ? null : e.GetProperty(k).GetInt64();
 
-    [Fact]
-    public void EventVectorsMatchTheRustImplementation()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void EventVectorsMatchTheRustImplementation(int version)
     {
-        var f = File_().GetProperty("event_v2");
-        Assert.Equal(Chain.EventDomain, f.GetProperty("domain").GetString());
+        var f = File_().GetProperty($"event_v{version}");
+        Assert.Equal(version == 2 ? Chain.EventDomain : Chain.EventDomainV3, f.GetProperty("domain").GetString());
         var prev = Chain.Genesis.ToArray();
         foreach (var v in f.GetProperty("rows").EnumerateArray())
         {
@@ -29,8 +31,10 @@ public sealed class GoldenVectorTests
                 S(v, "session_id"), S(v, "parent_session_id"), L(v, "pid")!.Value, S(v, "process_path")!,
                 S(v, "category")!, S(v, "action")!, S(v, "target")!, S(v, "outcome")!,
                 L(v, "size_bytes"), L(v, "bytes_out"), L(v, "bytes_in"), S(v, "project"),
-                S(v, "flags")!, L(v, "count")!.Value, S(v, "detections")!, S(v, "source")!);
-            var h = Chain.EventHash(prev, row);
+                S(v, "flags")!, L(v, "count")!.Value, S(v, "detections")!, S(v, "source")!,
+                version == 3 ? S(v, "agent_session_id") : null,
+                version == 3 ? S(v, "transcript") : null);
+            var h = Chain.EventHash(prev, row, version);
             Assert.Equal(S(v, "hash"), Chain.ToHex(h));
             prev = h;
         }
@@ -55,12 +59,27 @@ public sealed class GoldenVectorTests
         }
     }
 
+    [Theory]
+    [InlineData("", null)]
+    [InlineData(null, "")]
+    [InlineData("agent-1", "text")]
+    public void V2RejectsAgentFields(string? agentSessionId, string? transcript)
+    {
+        var row = new EventRow(1, "e", 1, "tool-a", null, null, 1, "/bin/tool-a", "command", "exec", "x",
+            "allowed", null, null, null, null, "", 1, "", "agent", agentSessionId, transcript);
+        Assert.Throws<ArgumentException>(() => Chain.EventHash(Chain.Genesis.Span, row, 2));
+    }
+
     [Fact]
     public void NullAndEmptyTextHashDifferently()
     {
         var a = new EventRow(1, "e", 1, "t", null, null, 1, "/p", "file", "read", "x", "allowed",
             null, null, null, null, "", 1, "", "os");
         var b = a with { Project = "" };
-        Assert.NotEqual(Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a)), Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, b)));
+        Assert.NotEqual(Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a, 3)),
+            Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a with { AgentSessionId = "" }, 3)));
+        Assert.NotEqual(Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a, 3)),
+            Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a with { Transcript = "" }, 3)));
+        Assert.NotEqual(Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, a, 2)), Chain.ToHex(Chain.EventHash(Chain.Genesis.Span, b, 2)));
     }
 }

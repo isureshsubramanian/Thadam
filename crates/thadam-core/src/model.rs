@@ -81,6 +81,9 @@ wire_enum!(
         DeniedByUser => "denied_by_user",
         DeniedByOs => "denied_by_os",
         Failed => "failed",
+        // The tool asked to run it and never reported a result; who stopped it is not known
+        // (ADR-011 amendment 1). Always carries `unconfirmed`.
+        NeverRan => "never_ran",
     }
 );
 
@@ -99,6 +102,8 @@ wire_enum!(
         Unconfirmed => "unconfirmed",
         // Bytes moved on a connection already reported in an earlier window (ADR-007).
         Continued => "continued",
+        // Reported by a tool's own helper session, not typed by the user (ADR-011 amendment 1).
+        Internal => "internal",
     }
 );
 
@@ -117,6 +122,16 @@ pub fn wire_set<T: WireName>(items: impl IntoIterator<Item = T>) -> String {
     names.sort_unstable();
     names.dedup();
     names.join(",")
+}
+
+/// The tool's own session behind an agent row (ADR-011 Decision 5): its session ID and the
+/// path of its transcript file, when it reported one.
+#[derive(Debug, Clone, PartialEq, Eq, Validate)]
+pub struct AgentLink {
+    #[garde(length(min = 1, max = MAX_SESSION_ID))]
+    pub session_id: String,
+    #[garde(inner(length(min = 1, max = MAX_PATH)))]
+    pub transcript: Option<String>,
 }
 
 /// An event as it arrives from a capture source, before validation and redaction. This is
@@ -162,6 +177,9 @@ pub struct NewEvent {
     pub count: u32,
     #[garde(custom(non_empty_sources))]
     pub sources: BTreeSet<Source>,
+    /// Set only on rows the tool reported itself (`Source::Agent`); needs encoding v3.
+    #[garde(dive)]
+    pub agent: Option<AgentLink>,
 }
 
 /// Cuts a target longer than `MAX_TARGET` at a character boundary and says so. Runs after
@@ -224,6 +242,7 @@ pub struct EventRecord {
     count: u32,
     detections: String,
     sources: BTreeSet<Source>,
+    agent: Option<AgentLink>,
 }
 
 impl EventRecord {
@@ -237,8 +256,17 @@ impl EventRecord {
         let ts_us = i64::try_from(input.ts.unix_timestamp_nanos() / 1_000)
             .map_err(|_| CoreError::TimestampOutOfRange)?;
 
+        if input.agent.is_some() && !input.sources.contains(&Source::Agent) {
+            return Err(CoreError::Invalid(
+                "agent link set on a row the tool did not report".to_string(),
+            ));
+        }
+
         let redacted = redactor.redact(&input.target);
         let mut flags = input.flags;
+        if input.outcome == Outcome::NeverRan {
+            flags.insert(Flag::Unconfirmed);
+        }
         if redacted.detections.get(DetectorKind::Secret) > 0 {
             flags.insert(Flag::SecretPattern);
         }
@@ -263,6 +291,7 @@ impl EventRecord {
             count: input.count,
             detections: redacted.detections.to_wire(),
             sources: input.sources,
+            agent: input.agent,
         })
     }
 
@@ -312,6 +341,73 @@ impl EventRecord {
             count: i64::from(self.count),
             detections: self.detections.clone(),
             source: wire_set(self.sources.iter().copied()),
+            agent_session_id: self.agent.as_ref().map(|a| a.session_id.clone()),
+            transcript: self.agent.as_ref().and_then(|a| a.transcript.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(sources: &[Source], agent: Option<AgentLink>, outcome: Outcome) -> NewEvent {
+        NewEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            tool: "tool-a".into(),
+            session_id: Some("s-7f3e".into()),
+            parent_session_id: None,
+            pid: 48200,
+            process_path: "/usr/local/bin/tool-a".into(),
+            category: Category::Command,
+            action: Action::Exec,
+            target: "rm -rf build/".into(),
+            outcome,
+            size_bytes: None,
+            bytes_out: None,
+            bytes_in: None,
+            project: None,
+            flags: BTreeSet::new(),
+            count: 1,
+            sources: sources.iter().copied().collect(),
+            agent,
+        }
+    }
+
+    fn link() -> Option<AgentLink> {
+        Some(AgentLink {
+            session_id: "a-51c2e9d0".into(),
+            transcript: None,
+        })
+    }
+
+    #[test]
+    fn only_rows_the_tool_reported_carry_an_agent_link() {
+        let redactor = Redactor::with_default_detectors().unwrap();
+        let os = EventRecord::new(event(&[Source::Os], link(), Outcome::Allowed), &redactor);
+        assert!(matches!(os, Err(CoreError::Invalid(_))));
+        let agent =
+            EventRecord::new(event(&[Source::Agent], link(), Outcome::Allowed), &redactor).unwrap();
+        let row = agent.to_row(1);
+        assert_eq!(row.agent_session_id.as_deref(), Some("a-51c2e9d0"));
+        assert_eq!(row.transcript, None);
+        // An empty session id is refused at the boundary.
+        let empty = Some(AgentLink {
+            session_id: String::new(),
+            transcript: None,
+        });
+        let bad = EventRecord::new(event(&[Source::Agent], empty, Outcome::Allowed), &redactor);
+        assert!(matches!(bad, Err(CoreError::Invalid(_))));
+    }
+
+    #[test]
+    fn never_ran_is_always_unconfirmed() {
+        let redactor = Redactor::with_default_detectors().unwrap();
+        let r = EventRecord::new(
+            event(&[Source::Agent], link(), Outcome::NeverRan),
+            &redactor,
+        )
+        .unwrap();
+        assert_eq!(r.to_row(1).flags, "unconfirmed");
     }
 }

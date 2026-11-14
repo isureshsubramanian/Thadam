@@ -42,8 +42,9 @@ public sealed record CatalogRead(IReadOnlyList<CatalogEntry> Entries, long? Brok
 public sealed class StoreFolder
 {
     public const string CatalogFile = "catalog.db";
-    private const long EventSchemaVersion = 2;
-    private const long CatalogSchemaVersion = 1;
+    /// <summary>Segments written before ADR-011 are version 2; newer ones are version 3. Both are read.</summary>
+    private static readonly long[] EventSchemaVersions = [2, 3];
+    private static readonly long[] CatalogSchemaVersions = [1];
 
     public StoreFolder(string path)
     {
@@ -60,7 +61,7 @@ public sealed class StoreFolder
         {
             throw new StoreLayoutException("not a segment name");
         }
-        return await OpenReadOnlyAsync(System.IO.Path.Combine(Path, name), EventSchemaVersion, ct)
+        return await OpenReadOnlyAsync(System.IO.Path.Combine(Path, name), EventSchemaVersions, ct)
             .ConfigureAwait(false);
     }
 
@@ -68,7 +69,7 @@ public sealed class StoreFolder
     public async Task<CatalogRead> ReadCatalogAsync(CancellationToken ct)
     {
         await using var conn = await OpenReadOnlyAsync(
-                System.IO.Path.Combine(Path, CatalogFile), CatalogSchemaVersion, ct)
+                System.IO.Path.Combine(Path, CatalogFile), CatalogSchemaVersions, ct)
             .ConfigureAwait(false);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
@@ -153,7 +154,7 @@ public sealed class StoreFolder
     public static IReadOnlyList<Pause> Pauses(IEnumerable<CatalogEntry> entries) =>
         [.. entries.Where(e => e.Kind == "paused").Select(e => new Pause(e.FromUs ?? 0, e.ToUs ?? 0, e.Missed ?? 0))];
 
-    private static async Task<SqliteConnection> OpenReadOnlyAsync(string file, long version, CancellationToken ct)
+    private static async Task<SqliteConnection> OpenReadOnlyAsync(string file, long[] versions, CancellationToken ct)
     {
         if (!File.Exists(file))
         {
@@ -172,10 +173,10 @@ public sealed class StoreFolder
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "PRAGMA query_only = ON; PRAGMA user_version;";
             var found = (long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L);
-            if (found != version)
+            if (!versions.Contains(found))
             {
                 throw new StoreLayoutException(
-                    $"{System.IO.Path.GetFileName(file)}: schema version {found}, expected {version}");
+                    $"{System.IO.Path.GetFileName(file)}: schema version {found}, expected {string.Join(" or ", versions)}");
             }
             return conn;
         }
@@ -184,6 +185,15 @@ public sealed class StoreFolder
             await conn.DisposeAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>The schema version of an open segment (2 or 3, as checked when it was opened).</summary>
+    public static async Task<int> SegmentVersionAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(conn);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA user_version";
+        return checked((int)(long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L));
     }
 
     internal static string? Text(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetString(i);

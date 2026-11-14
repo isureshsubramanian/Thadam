@@ -67,7 +67,7 @@ public sealed class SearchParserTests
         var q = Ok("category:network-external flag:unknown-host flag:large_upload outcome:denied action:connect");
         Assert.Equal("network_external", q.Category);
         Assert.Equal(["unknown_host", "large_upload"], q.Flags);
-        Assert.Equal(["denied_by_agent", "denied_by_user", "denied_by_os"], q.Outcomes);
+        Assert.Equal(["denied_by_agent", "denied_by_user", "denied_by_os", "never_ran"], q.Outcomes);
         Assert.Equal("connect", q.Action);
     }
 
