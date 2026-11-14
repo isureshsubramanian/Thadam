@@ -8,18 +8,20 @@
 //!
 //! One pipeline thread owns the process tree, so OS events and network flows need no lock
 //! (ADR-007 Decision 4). Both channels are bounded. If the writer falls behind, the pipeline waits, then the
-//! reader, then the OS logger buffers: nothing is dropped silently.
+//! reader, then the OS logger buffers: nothing is dropped silently. The one exception is a
+//! low disk (ADR-009 Decision 4): the writer then counts records instead of writing them,
+//! and the catalog records the gap with its count.
 
 use std::io::BufReader;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thadam_core::{EventRecord, Redactor};
-use thadam_store::{Store, StoreError};
+use thadam_store::{SegmentStatus, SegmentWriter, StoreError, Written};
 use thiserror::Error;
 
 use crate::pipeline::{Pipeline, Stats};
@@ -40,6 +42,9 @@ const RECORD_BUFFER: usize = 10_000;
 /// How long to keep draining after a stop request before giving up on the source.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(500);
+/// How often the writer applies the retention limits and checks free space (ADR-009
+/// Decision 3).
+const MAINTAIN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -104,7 +109,7 @@ pub fn run<S>(
     source: S,
     flows: Option<FlowListener>,
     pipeline: &mut Pipeline,
-    store: Store,
+    store: SegmentWriter,
     stop: &AtomicBool,
     prepare: impl FnOnce(&mut Pipeline),
     on_stop: impl FnOnce(),
@@ -127,9 +132,11 @@ where
     let (record_tx, record_rx) = sync_channel::<EventRecord>(RECORD_BUFFER);
     // Shared so progress lines show rows written so far, not only the total at the end.
     let written = Arc::new(AtomicU64::new(0));
+    let status = Arc::new(Mutex::new(store.status()));
     let writer = {
         let written = Arc::clone(&written);
-        std::thread::spawn(move || write_all(store, &record_rx, &written))
+        let status = Arc::clone(&status);
+        std::thread::spawn(move || write_all(store, &record_rx, &written, &status))
     };
 
     prepare(pipeline);
@@ -144,11 +151,13 @@ where
         Progress {
             every: report_every,
             written: &written,
+            status: &status,
         },
     );
     drop(record_tx);
     writer.join().map_err(|_| RunError::Writer)??;
     pipeline.stats.written = written.load(Ordering::Relaxed);
+    pipeline.stats.store = status.lock().ok().map(|s| *s);
     let ended = outcome?;
     Ok((ended, pipeline.stats.clone()))
 }
@@ -170,22 +179,65 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>) {
     }
 }
 
+/// Writes records and, once a minute, applies the retention limits. A record not written
+/// because the disk is low is counted by the writer and noted in the catalog on resume.
 fn write_all(
-    mut store: Store,
+    mut store: SegmentWriter,
     rx: &Receiver<EventRecord>,
     written: &AtomicU64,
+    status: &Mutex<SegmentStatus>,
 ) -> Result<(), StoreError> {
-    for record in rx {
-        store.append(&record)?;
-        written.fetch_add(1, Ordering::Relaxed);
+    let publish = |store: &SegmentWriter| {
+        if let Ok(mut s) = status.lock() {
+            *s = store.status();
+        }
+    };
+    store.maintain(now_us())?;
+    publish(&store);
+    let mut last_maintain = Instant::now();
+    loop {
+        match rx.recv_timeout(MAINTAIN_EVERY) {
+            Ok(record) => {
+                let was_paused = store.status().paused;
+                if store.append(&record, now_us())? == Written::Row {
+                    written.fetch_add(1, Ordering::Relaxed);
+                }
+                // A rollover runs the limits too, so writing can pause here.
+                if store.status().paused != was_paused {
+                    if !was_paused {
+                        eprintln!("thadam-collector: disk low, writing paused");
+                    }
+                    publish(&store);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if last_maintain.elapsed() >= MAINTAIN_EVERY {
+            let was_paused = store.status().paused;
+            store.maintain(now_us())?;
+            if store.status().paused && !was_paused {
+                // One line, counts only (ADR-009 Decision 4).
+                eprintln!("thadam-collector: disk low, writing paused");
+            }
+            publish(&store);
+            last_maintain = Instant::now();
+        }
     }
-    Ok(())
+    publish(&store);
+    store.finish(now_us())
 }
 
-/// When to print a progress line, and the writer's running count for it.
+fn now_us() -> i64 {
+    i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000)
+        .unwrap_or(i64::MAX)
+}
+
+/// When to print a progress line, and the writer's running figures for it.
 struct Progress<'a> {
     every: Duration,
     written: &'a AtomicU64,
+    status: &'a Mutex<SegmentStatus>,
 }
 
 fn process(
@@ -213,6 +265,7 @@ fn process(
         }
         if last_report.elapsed() >= progress.every {
             pipeline.stats.written = progress.written.load(Ordering::Relaxed);
+            pipeline.stats.store = progress.status.lock().ok().map(|s| *s);
             eprintln!("thadam-collector: {}", pipeline.stats);
             last_report = Instant::now();
         }

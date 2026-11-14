@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use thadam_core::{CoreError, DetectorKind, NewEvent, Redactor};
+use thadam_store::SegmentStatus;
 use time::Duration;
 
 use crate::classify::classify;
@@ -39,6 +40,8 @@ pub struct Stats {
     pub flows_rejected: BTreeMap<RejectReason, u64>,
     pub net_gaps: u64,
     pub net_missed: u64,
+    /// The store folder, as the writer last saw it (ADR-009 Risks: tune limits from this).
+    pub store: Option<SegmentStatus>,
 }
 
 impl fmt::Display for Stats {
@@ -73,6 +76,20 @@ impl fmt::Display for Stats {
                 for (reason, n) in &self.flows_rejected {
                     write!(f, " flows_rejected_{}={n}", reason.name())?;
                 }
+            }
+        }
+        if let Some(st) = &self.store {
+            write!(
+                f,
+                " store_mb={} free_gb={} segments={} retired={}",
+                st.store_bytes / 1_000_000,
+                st.free_bytes / 1_000_000_000,
+                st.segments,
+                st.retired
+            )?;
+            if st.paused || st.missed > 0 {
+                let state = if st.paused { "paused" } else { "resumed" };
+                write!(f, " writing={state} not_written={}", st.missed)?;
             }
         }
         Ok(())

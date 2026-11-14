@@ -5,13 +5,23 @@
 //! reject UPDATE and DELETE, which stops accidental or casual change. They do not stop
 //! someone with write access to the file; the chain is what makes such change detectable.
 
+mod catalog;
+mod disk;
 mod schema;
+mod segments;
 
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use thadam_core::{CanonicalRow, CoreError, EventRecord, GENESIS, row_hash, to_hex};
 use thiserror::Error;
+
+pub use catalog::{Catalog, CatalogEntry, CatalogReport};
+pub use disk::{DiskSpace, SystemDisk};
+pub use segments::{
+    CATALOG_FILE, DirBreak, DirReport, Limits, MigrateReport, RetiredRange, SegmentStatus,
+    SegmentWriter, Written, migrate, verify_dir,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -23,11 +33,42 @@ pub enum StoreError {
     BadHashLength(i64),
     #[error("unsupported schema version {0}")]
     SchemaVersion(i64),
+    #[error("file error: {0}")]
+    Io(#[from] std::io::Error),
+    /// The catalog and the segment files disagree in a way the store cannot repair. Carries
+    /// a segment name and sequence numbers only.
+    #[error("store layout: {0}")]
+    Layout(String),
+}
+
+/// Where a chain (or a segment of it) starts: the first row's seq and its `prev_hash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainStart {
+    pub seq: i64,
+    pub prev_hash: [u8; 32],
+}
+
+impl ChainStart {
+    pub const GENESIS: ChainStart = ChainStart {
+        seq: 1,
+        prev_hash: GENESIS,
+    };
+}
+
+/// The last row of a store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tail {
+    pub seq: i64,
+    pub hash: [u8; 32],
+    pub ts_us: i64,
 }
 
 /// The event store. Owns one SQLite connection; one writer per database file.
 pub struct Store {
     conn: Connection,
+    /// Where this file's part of the chain starts. Seq 1 and the zero hash for a whole
+    /// store; the previous segment's end for a segment (ADR-009 Decision 1).
+    start: ChainStart,
 }
 
 /// Position of a row in the chain after it was appended.
@@ -72,18 +113,75 @@ impl VerifyReport {
 impl Store {
     /// Opens or creates a store and applies the schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_segment(path, ChainStart::GENESIS)
+    }
+
+    /// Opens or creates a store whose first row continues a chain at `start`.
+    pub fn open_segment(path: impl AsRef<Path>, start: ChainStart) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         schema::apply(&conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, start })
     }
 
     /// Opens an existing store without the ability to write, for verification and reads.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_segment_read_only(path, ChainStart::GENESIS)
+    }
+
+    /// Opens an existing segment read-only, for verifying it from `start`.
+    pub fn open_segment_read_only(
+        path: impl AsRef<Path>,
+        start: ChainStart,
+    ) -> Result<Self, StoreError> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         schema::check_version(&conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, start })
+    }
+
+    /// The first row, if any: its seq, `prev_hash` and time.
+    pub fn head(&self) -> Result<Option<(i64, [u8; 32], i64)>, StoreError> {
+        let head: Option<(i64, Vec<u8>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT seq, prev_hash, ts_us FROM events ORDER BY seq LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        head.map(|(seq, prev, ts)| {
+            to_array(&prev)
+                .map(|p| (seq, p, ts))
+                .ok_or(StoreError::BadHashLength(seq))
+        })
+        .transpose()
+    }
+
+    /// The last row, if any.
+    pub fn tail(&self) -> Result<Option<Tail>, StoreError> {
+        let tail: Option<(i64, Vec<u8>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT seq, hash, ts_us FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        tail.map(|(seq, hash, ts_us)| {
+            to_array(&hash)
+                .map(|hash| Tail { seq, hash, ts_us })
+                .ok_or(StoreError::BadHashLength(seq))
+        })
+        .transpose()
+    }
+
+    /// Number of rows.
+    pub fn rows(&self) -> Result<u64, StoreError> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 
     /// Appends one event at the end of the chain, atomically.
@@ -99,7 +197,7 @@ impl Store {
             )
             .optional()?;
         let (seq, prev_hash) = match tail {
-            None => (1, GENESIS),
+            None => (self.start.seq, self.start.prev_hash),
             Some((last, hash)) => (
                 last + 1,
                 to_array(&hash).ok_or(StoreError::BadHashLength(last))?,
@@ -142,7 +240,7 @@ impl Store {
         Ok(Appended { seq, hash })
     }
 
-    /// Walks the whole chain from seq 1 and reports the first break, if any.
+    /// Walks this file's chain from its start and reports the first break, if any.
     pub fn verify(&self) -> Result<VerifyReport, StoreError> {
         let total: i64 = self
             .conn
@@ -156,8 +254,8 @@ impl Store {
         )?;
         let mut rows = stmt.query([])?;
 
-        let mut expected_seq: i64 = 1;
-        let mut prev = GENESIS;
+        let mut expected_seq: i64 = self.start.seq;
+        let mut prev = self.start.prev_hash;
         let mut verified: u64 = 0;
         while let Some(r) = rows.next()? {
             let seq: i64 = r.get(0)?;

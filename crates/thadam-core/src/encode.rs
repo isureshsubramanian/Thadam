@@ -70,7 +70,7 @@ pub fn encode(row: &CanonicalRow) -> Result<Vec<u8>, CoreError> {
     Ok(buf)
 }
 
-fn put_text(buf: &mut Vec<u8>, s: &str) -> Result<(), CoreError> {
+pub(crate) fn put_text(buf: &mut Vec<u8>, s: &str) -> Result<(), CoreError> {
     let len = u32::try_from(s.len()).map_err(|_| CoreError::FieldTooLong)?;
     if len == NULL_MARKER {
         return Err(CoreError::FieldTooLong);
@@ -80,7 +80,7 @@ fn put_text(buf: &mut Vec<u8>, s: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn put_opt_text(buf: &mut Vec<u8>, s: Option<&str>) -> Result<(), CoreError> {
+pub(crate) fn put_opt_text(buf: &mut Vec<u8>, s: Option<&str>) -> Result<(), CoreError> {
     match s {
         Some(s) => put_text(buf, s),
         None => {
@@ -90,11 +90,11 @@ fn put_opt_text(buf: &mut Vec<u8>, s: Option<&str>) -> Result<(), CoreError> {
     }
 }
 
-fn put_int(buf: &mut Vec<u8>, v: i64) {
+pub(crate) fn put_int(buf: &mut Vec<u8>, v: i64) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
-fn put_opt_int(buf: &mut Vec<u8>, v: Option<i64>) {
+pub(crate) fn put_opt_int(buf: &mut Vec<u8>, v: Option<i64>) {
     match v {
         Some(v) => put_int(buf, v),
         None => buf.extend_from_slice(&NULL_MARKER.to_be_bytes()),

@@ -18,10 +18,10 @@ use thadam_collector::run::{Ended, run, spawn_logger};
 use thadam_collector::snapshot::{self, SystemProcessTable};
 use thadam_collector::source::eslogger::EsloggerSource;
 use thadam_collector::source::network::{DEFAULT_SOCKET, FlowListener};
-use thadam_store::Store;
+use thadam_store::{SegmentWriter, SystemDisk};
 
 const USAGE: &str = "usage:
-  thadam-collector run --registry <file> --store <db> [--source eslogger|stdin] [--window-secs <n>]
+  thadam-collector run --registry <file> --store <folder> [--source eslogger|stdin] [--window-secs <n>]
                        [--flow-socket <path>|off]   (default: the system path with eslogger, off with stdin)
   thadam-collector check-registry <file>
   thadam-collector snapshot --registry <file>";
@@ -146,7 +146,16 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
             })?;
         settings.window = time::Duration::seconds(secs);
     }
-    let store = Store::open(store_path).map_err(|e| Failure::Usage(e.to_string()))?;
+    // The store is a folder of weekly segments with a catalog (ADR-009 Decision 1).
+    let store = SegmentWriter::open(
+        store_path,
+        registry.retention().clone(),
+        Box::new(SystemDisk),
+    )
+    .map_err(|e| Failure::Usage(e.to_string()))?;
+    for warning in store.warnings() {
+        eprintln!("thadam-collector: store warning: {warning}");
+    }
     let source = o.source.as_deref().unwrap_or("eslogger");
     let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
 

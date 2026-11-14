@@ -4,11 +4,12 @@
 //! code-signing identity, never by file name, because a tool's binary can be renamed on
 //! every update. Errors name the field that failed, never the value in it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use garde::Validate;
 use serde::Deserialize;
 use thadam_core::model::MAX_TOOL_KEY;
+use thadam_store::Limits;
 use thiserror::Error;
 
 use crate::source::Identity;
@@ -46,6 +47,12 @@ pub const DEFAULT_LARGE_UPLOAD_SESSION: i64 = 50 * 1024 * 1024;
 const MAX_UPLOAD_THRESHOLD: i64 = 1 << 40;
 /// Most host patterns per tool (estimate; real lists are a handful).
 const MAX_KNOWN_HOSTS: usize = 1_000;
+/// Retention bounds (ADR-009 Decision 3): ages 7 to 3,650 days, sizes 1 GB to 1 TB, free
+/// floor at least 1 GB. The defaults are the store's `Limits::default()`.
+const MIN_AGE_DAYS: u32 = 7;
+const MAX_AGE_DAYS: u32 = 3_650;
+const MAX_GB: u64 = 1_000;
+const GB: u64 = 1_000_000_000;
 
 #[derive(Debug, Error)]
 pub enum RegistryError {
@@ -249,6 +256,7 @@ pub struct Registry {
     rollup_names: Vec<String>,
     rollup_paths: Vec<PathPattern>,
     read_budget: usize,
+    retention: Limits,
 }
 
 impl Registry {
@@ -321,6 +329,12 @@ impl Registry {
                 .chain(file.rollup.paths.iter().map(|p| PathPattern::parse(p)))
                 .collect(),
             read_budget: file.rollup.read_budget,
+            retention: Limits {
+                max_age_days: file.retention.max_age_days,
+                max_store_bytes: file.retention.max_store_gb * GB,
+                min_free_bytes: file.retention.min_free_gb * GB,
+                archive_dir: file.retention.archive_dir.map(PathBuf::from),
+            },
         })
     }
 
@@ -369,6 +383,11 @@ impl Registry {
     }
 
     /// Individual reads per process per window (ADR-005 Rule 2).
+    /// How long and how much the store keeps (ADR-009 Decision 3).
+    pub fn retention(&self) -> &Limits {
+        &self.retention
+    }
+
     pub fn read_budget(&self) -> usize {
         self.read_budget
     }
@@ -404,6 +423,50 @@ struct RegistryFile {
     #[serde(default)]
     #[garde(dive)]
     rollup: RollupEntry,
+    #[serde(default)]
+    #[garde(dive)]
+    retention: RetentionEntry,
+}
+
+/// Sizes in whole GB (10^9 bytes), as people think of disk space.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+struct RetentionEntry {
+    #[serde(default = "default_max_age_days")]
+    #[garde(range(min = MIN_AGE_DAYS, max = MAX_AGE_DAYS))]
+    max_age_days: u32,
+    #[serde(default = "default_max_store_gb")]
+    #[garde(range(min = 1, max = MAX_GB))]
+    max_store_gb: u64,
+    #[serde(default = "default_min_free_gb")]
+    #[garde(range(min = 1, max = MAX_GB))]
+    min_free_gb: u64,
+    #[serde(default)]
+    #[garde(inner(custom(absolute_path)))]
+    archive_dir: Option<String>,
+}
+
+impl Default for RetentionEntry {
+    fn default() -> Self {
+        Self {
+            max_age_days: default_max_age_days(),
+            max_store_gb: default_max_store_gb(),
+            min_free_gb: default_min_free_gb(),
+            archive_dir: None,
+        }
+    }
+}
+
+fn default_max_age_days() -> u32 {
+    Limits::default().max_age_days
+}
+
+fn default_max_store_gb() -> u64 {
+    Limits::default().max_store_bytes / GB
+}
+
+fn default_min_free_gb() -> u64 {
+    Limits::default().min_free_bytes / GB
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -655,6 +718,56 @@ mod tests {
 
     fn key(r: &Registry, id: Option<ToolId>) -> Option<&str> {
         id.and_then(|i| r.tool(i)).map(|t| t.key.as_str())
+    }
+
+    #[test]
+    fn retention_defaults_and_valid_values_load() {
+        let r = Registry::parse(SAMPLE).unwrap();
+        assert_eq!(r.retention(), &Limits::default());
+        let custom = SAMPLE.replacen(
+            r#""version": 1,"#,
+            r#""version": 1, "retention": { "max_age_days": 30, "max_store_gb": 5,
+                "min_free_gb": 2, "archive_dir": "/Volumes/Archive/thadam" },"#,
+            1,
+        );
+        let r = Registry::parse(&custom).unwrap();
+        assert_eq!(
+            r.retention(),
+            &Limits {
+                max_age_days: 30,
+                max_store_bytes: 5 * GB,
+                min_free_bytes: 2 * GB,
+                archive_dir: Some(PathBuf::from("/Volumes/Archive/thadam")),
+            }
+        );
+    }
+
+    #[test]
+    fn out_of_range_retention_is_rejected_without_echoing_the_value() {
+        for (field, value) in [
+            ("max_age_days", "6"),
+            ("max_age_days", "3651"),
+            ("max_store_gb", "0"),
+            ("max_store_gb", "1001"),
+            ("min_free_gb", "0"),
+            ("archive_dir", r#""relative/folder-9731""#),
+        ] {
+            let json = SAMPLE.replacen(
+                r#""version": 1,"#,
+                &format!(r#""version": 1, "retention": {{ "{field}": {value} }},"#),
+                1,
+            );
+            let err = Registry::parse(&json).unwrap_err().to_string();
+            assert!(err.contains(field), "{field}: {err}");
+            let bare = value.trim_matches('"');
+            assert!(!err.contains(bare), "{field} echoed its value: {err}");
+        }
+        let unknown = SAMPLE.replacen(
+            r#""version": 1,"#,
+            r#""version": 1, "retention": { "keep_forever": true },"#,
+            1,
+        );
+        assert!(Registry::parse(&unknown).is_err());
     }
 
     #[test]

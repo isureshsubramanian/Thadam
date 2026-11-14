@@ -285,6 +285,11 @@ impl EventRecord {
     }
 
     /// The row as it will be stored and hashed at position `seq`.
+    /// When the event happened, in microseconds since the Unix epoch (UTC).
+    pub fn ts_us(&self) -> i64 {
+        self.ts_us
+    }
+
     pub fn to_row(&self, seq: i64) -> CanonicalRow {
         CanonicalRow {
             seq,

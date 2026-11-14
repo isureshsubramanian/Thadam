@@ -2,6 +2,7 @@
 //! store tamper-evident, and the sensitive-data detectors that redact text before it is
 //! stored. This crate performs no I/O.
 
+pub mod catalog;
 pub mod chain;
 pub mod detect;
 pub mod detectors;
@@ -10,6 +11,7 @@ pub mod error;
 pub mod exec;
 pub mod model;
 
+pub use catalog::{CATALOG_DOMAIN, CatalogKind, CatalogRow, catalog_hash, encode_catalog};
 pub use chain::{GENESIS, row_hash, to_hex};
 pub use detect::{Detections, Detector, DetectorKind, Redacted, Redactor};
 pub use encode::{CanonicalRow, encode};

@@ -17,6 +17,7 @@
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
+!/scripts/migrate-store.sh
 !/scripts/swift-unwrap-check.pl
 
 # Never commit data or build output, even inside allowed folders.

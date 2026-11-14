@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use thadam_store::Store;
+use thadam_store::{Store, verify_dir};
 
 const BIN: &str = env!("CARGO_BIN_EXE_thadam-collector");
 const ENV_MARKER: &str = "SYNTHETIC-ENV-MARKER-7c41";
@@ -190,13 +190,27 @@ fn with_closes(stream: &str) -> String {
     out.join("\n") + "\n"
 }
 
+/// The one segment file a short synthetic run writes (ADR-009: the store is a folder).
+fn only_segment(store: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(store)
+        .ok()?
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with("events-") && name.ends_with(".db")
+        })
+        .collect();
+    assert!(found.len() <= 1, "expected one segment, found {found:?}");
+    found.pop()
+}
+
 fn run_stdin(dir: &TempDir, input: &str, extra: &[&str]) -> (std::process::Output, PathBuf) {
-    let db = dir.path("events.db");
+    let store = dir.path("store");
     let mut child = Command::new(BIN)
         .args(["run", "--source", "stdin", "--registry"])
         .arg(dir.path("registry.json"))
         .arg("--store")
-        .arg(&db)
+        .arg(&store)
         .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -209,11 +223,18 @@ fn run_stdin(dir: &TempDir, input: &str, extra: &[&str]) -> (std::process::Outpu
         .unwrap()
         .write_all(input.as_bytes())
         .unwrap();
-    (child.wait_with_output().unwrap(), db)
+    let out = child.wait_with_output().unwrap();
+    // A run that failed at setup leaves no segment; callers then only look at the output.
+    let db = only_segment(&store).unwrap_or_else(|| store.join("none.db"));
+    (out, db)
 }
 
 /// (category, action, target, count, flags, detections) in seq order.
 fn rows(db: &Path) -> Vec<(String, String, String, i64, String, String)> {
+    // Segments open on their first row, so a run that kept nothing has no file.
+    if !db.exists() {
+        return Vec::new();
+    }
     let store = Store::open_read_only(db).unwrap();
     let mut stmt = store
         .connection()
@@ -237,10 +258,10 @@ fn rows(db: &Path) -> Vec<(String, String, String, i64, String, String)> {
 }
 
 fn db_files_contain(dir: &TempDir, needle: &str) -> bool {
-    std::fs::read_dir(&dir.0).unwrap().any(|entry| {
+    std::fs::read_dir(dir.path("store")).unwrap().any(|entry| {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        name.starts_with("events.db")
+        (name.starts_with("events-") || name.starts_with("catalog.db"))
             && std::fs::read(&path)
                 .unwrap()
                 .windows(needle.len())
@@ -335,6 +356,11 @@ fn the_written_chain_verifies() {
     let report = Store::open_read_only(&db).unwrap().verify().unwrap();
     assert!(report.is_ok());
     assert_eq!(report.total, 5);
+    // The folder as a whole verifies too, and the stats line reports the store.
+    let folder = verify_dir(dir.path("store")).unwrap();
+    assert_eq!(folder.broken, None);
+    assert_eq!(folder.verified_rows, 5);
+    assert!(String::from_utf8_lossy(&out.stderr).contains(" store_mb="));
 }
 
 #[test]
@@ -414,12 +440,12 @@ fn usage_and_registry_errors_exit_2_without_values() {
 #[test]
 fn interrupt_stops_cleanly_and_flushes_open_windows() {
     let dir = TempDir::new("sigint");
-    let db = dir.path("events.db");
+    let store = dir.path("store");
     let mut child = Command::new(BIN)
         .args(["run", "--source", "stdin", "--registry"])
         .arg(dir.path("registry.json"))
         .arg("--store")
-        .arg(&db)
+        .arg(&store)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -433,9 +459,11 @@ fn interrupt_stops_cleanly_and_flushes_open_windows() {
     // pipeline starts), so wait for them rather than for a fixed time.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while std::time::Instant::now() < deadline {
-        let ready = Store::open_read_only(&db)
-            .and_then(|s| s.verify())
-            .is_ok_and(|r| r.total > 0);
+        let ready = only_segment(&store).is_some_and(|db| {
+            Store::open_read_only(&db)
+                .and_then(|s| s.verify())
+                .is_ok_and(|r| r.total > 0)
+        });
         if ready {
             break;
         }
@@ -454,7 +482,11 @@ fn interrupt_stops_cleanly_and_flushes_open_windows() {
         String::from_utf8_lossy(&out.stderr)
     );
     // The 47-read window was still open when the signal arrived.
-    assert!(rows(&db).iter().any(|r| r.3 == 47));
+    assert!(
+        rows(&only_segment(&store).unwrap())
+            .iter()
+            .any(|r| r.3 == 47)
+    );
 }
 
 /// A process signed as the second registered tool.
@@ -808,12 +840,12 @@ fn flow_bytes(kind: &str, n: u32, secs: u32, out: u64, inn: u64) -> String {
 fn network_flows_are_attributed_to_sessions() {
     let dir = TempDir::new("net");
     let socket = dir.path("s").join("f.sock");
-    let db = dir.path("events.db");
+    let store = dir.path("store");
     let mut child = Command::new(BIN)
         .args(["run", "--source", "stdin", "--registry"])
         .arg(dir.path("registry.json"))
         .arg("--store")
-        .arg(&db)
+        .arg(&store)
         .arg("--flow-socket")
         .arg(&socket)
         .stdin(Stdio::piped())
@@ -897,7 +929,7 @@ fn network_flows_are_attributed_to_sessions() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
 
-    let store = Store::open_read_only(&db).unwrap();
+    let store = Store::open_read_only(only_segment(&store).unwrap()).unwrap();
     assert!(store.verify().unwrap().is_ok());
     let conn = store.connection();
     let exec_session: String = conn
