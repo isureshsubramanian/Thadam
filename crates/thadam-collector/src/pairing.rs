@@ -29,6 +29,10 @@ const SWEEP_EVERY: Duration = Duration::seconds(5);
 const MAX_TIMES: usize = 1_024;
 /// Children tracked per held path; beyond this its result is unconfirmed.
 const MAX_HEIRS: usize = 64;
+/// Device files. Programs routinely fail to open some of these at start-up (`/dev/tty`
+/// with no terminal attached, `/dev/dtracehelper`), and the logger can't say why an open
+/// failed, so a failed device open is not recorded (ADR-006 amendment 1).
+const DEVICE_PREFIX: &str = "/dev/";
 
 /// A record whose result is now known, with its roll-up eligibility.
 #[derive(Debug)]
@@ -262,7 +266,7 @@ impl Pairing {
         let mut done: Vec<Released> = proc
             .paths
             .into_values()
-            .map(|p| {
+            .filter_map(|p| {
                 let verdict = if p.settled() {
                     Verdict::Denied
                 } else {
@@ -304,7 +308,7 @@ impl Pairing {
             for path in expired {
                 if let Some(p) = proc.paths.remove(&path) {
                     self.held -= 1;
-                    done.push(decide(p, Verdict::Denied));
+                    done.extend(decide(p, Verdict::Denied));
                 }
             }
         }
@@ -336,7 +340,7 @@ impl Pairing {
             {
                 let pending = proc.paths.remove(&path)?;
                 self.held -= 1;
-                return Some(decide(pending, Verdict::Unconfirmed));
+                return decide(pending, Verdict::Unconfirmed);
             }
         }
         None
@@ -357,8 +361,11 @@ impl Pairing {
     }
 }
 
-/// The row for opens that were never closed.
-fn decide(pending: Pending, verdict: Verdict) -> Released {
+/// The row for opens that were never closed, if one is recorded.
+fn decide(pending: Pending, verdict: Verdict) -> Option<Released> {
+    if matches!(verdict, Verdict::Denied) && pending.record.target.starts_with(DEVICE_PREFIX) {
+        return None;
+    }
     let count = pending.unclosed();
     let mut record = pending.record;
     record.ts = pending.times.front().copied().unwrap_or(record.ts);
@@ -373,10 +380,10 @@ fn decide(pending: Pending, verdict: Verdict) -> Released {
             record.flags.insert(Flag::Unconfirmed);
         }
     }
-    Released {
+    Some(Released {
         record,
         rollup: Rollup::Never,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -577,6 +584,19 @@ mod tests {
         read(&mut p, 3);
         assert!(p.close(9999, 1, PATH, at(4)).is_empty());
         assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn failed_device_opens_are_not_recorded() {
+        let mut p = Pairing::default();
+        let mut tty = record(Action::Read, 0);
+        tty.target = "/dev/tty".into();
+        p.open(4300, "/dev/tty", tty, Rollup::Never, true, true);
+        read(&mut p, 0);
+        let out = p.exit(4300, 4211);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].record.target, PATH);
+        assert!(p.is_empty());
     }
 
     #[test]
