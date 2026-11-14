@@ -93,6 +93,8 @@ wire_enum!(
         UnknownHost => "unknown_host",
         LargeUpload => "large_upload",
         ToolInternal => "tool_internal",
+        // Stands for many paths under one folder (ADR-005).
+        RolledUp => "rolled_up",
     }
 );
 

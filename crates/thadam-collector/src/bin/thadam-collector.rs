@@ -156,7 +156,8 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         });
     }
 
-    let mut pipeline = Pipeline::new(registry, settings);
+    let mut pipeline =
+        Pipeline::new(registry, settings).map_err(|e| Failure::Runtime(e.to_string()))?;
     let (ended, stats) = match o.source.as_deref().unwrap_or("eslogger") {
         "eslogger" => {
             let (child, stdout) = spawn_logger()

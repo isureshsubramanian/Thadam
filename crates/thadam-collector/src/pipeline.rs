@@ -5,12 +5,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use thadam_core::NewEvent;
+use thadam_core::{CoreError, DetectorKind, NewEvent, Redactor};
 use time::Duration;
 
 use crate::classify::classify;
 use crate::collapse::Collapser;
 use crate::registry::Registry;
+use crate::rollup::{self, Rollup};
 use crate::snapshot::Snapshot;
 use crate::source::{SkipReason, SourceItem};
 use crate::tree::ProcessTree;
@@ -68,18 +69,23 @@ pub struct Pipeline {
     registry: Registry,
     tree: ProcessTree,
     collapser: Collapser,
+    /// Finds secrets in roll-up candidates' paths, which must stay individual (ADR-005).
+    redactor: Redactor,
     pub stats: Stats,
 }
 
 impl Pipeline {
-    pub fn new(registry: Registry, settings: Settings) -> Self {
+    pub fn new(registry: Registry, settings: Settings) -> Result<Self, CoreError> {
         let tree = ProcessTree::new(registry.responsible_attribution());
-        Self {
+        let collapser =
+            Collapser::with_read_budget(settings.window, settings.cap, registry.read_budget());
+        Ok(Self {
             registry,
             tree,
-            collapser: Collapser::new(settings.window, settings.cap),
+            collapser,
+            redactor: Redactor::with_default_detectors()?,
             stats: Stats::default(),
-        }
+        })
     }
 
     pub fn registry(&self) -> &Registry {
@@ -112,7 +118,15 @@ impl Pipeline {
             .as_ref()
             .and_then(|m| classify(&event, m, &self.registry))
         {
-            Some(record) => self.collapser.push(record),
+            Some(record) => {
+                let mut rollup = rollup::hint(&event, &record, &self.registry);
+                if rollup != Rollup::Never
+                    && self.redactor.scan(&record.target).get(DetectorKind::Secret) > 0
+                {
+                    rollup = Rollup::Never;
+                }
+                self.collapser.push_with(record, rollup)
+            }
             None => self.collapser.advance(event.ts),
         };
         if observation.member.is_some() {

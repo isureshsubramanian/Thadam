@@ -403,7 +403,18 @@ fn interrupt_stops_cleanly_and_flushes_open_windows() {
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(sample_stream().as_bytes()).unwrap();
     stdin.flush().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Rows appear only after the signal handler is installed (it is set up before the
+    // pipeline starts), so wait for them rather than for a fixed time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let ready = Store::open_read_only(&db)
+            .and_then(|s| s.verify())
+            .is_ok_and(|r| r.total > 0);
+        if ready {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let status = Command::new("/bin/kill")
         .args(["-INT", &child.id().to_string()])
         .status()
@@ -486,4 +497,153 @@ fn delegated_sessions_are_linked_to_their_parent() {
     assert_eq!(got[2].0, "second_agent");
     assert_ne!(delegated_session, agent_session);
     assert_eq!(got[2].3.as_deref(), Some(agent_session.as_str()));
+}
+
+/// ADR-005 acceptance 8: a synthetic build. A compiler creates 3,000 files under the
+/// project's `target/`, a scanner reads 250 source files, a formatter rewrites 250, the
+/// agent itself reads one file, and a key-like file inside `target/` is read.
+fn build_stream() -> String {
+    let shell = process(4211, 4100, "/bin/zsh", false);
+    let agent = process(4211, 4100, "/Users/test/.local/bin/2.4.1", true);
+    let compiler = process(4500, 4211, "/Users/test/.rustup/bin/rustc", false);
+    let scanner = process(4600, 4211, "/usr/bin/git", false);
+    let formatter = process(4700, 4211, "/Users/test/.cargo/bin/rustfmt", false);
+    let project = "/Users/test/projects/demo";
+    let mut seq = 100u64;
+    let mut lines = Vec::new();
+    let mut push = |secs: u32, proc_json: &str, kind: &str, body: String| {
+        seq += 1;
+        lines.push(line(seq, secs, proc_json, kind, &body));
+    };
+    push(
+        0,
+        &shell,
+        "exec",
+        format!(
+            r#"{{"target":{agent},"args":["agent"],"env":[],"cwd":{}}}"#,
+            file(project)
+        ),
+    );
+    for child in [&compiler, &scanner, &formatter] {
+        push(0, &agent, "fork", format!(r#"{{"child":{child}}}"#));
+    }
+    for i in 0..3_000u32 {
+        push(
+            1 + i / 300,
+            &compiler,
+            "create",
+            format!(
+                r#"{{"destination":{{"new_path":{{"dir":{{"path":"{project}/target/debug/deps"}},"filename":"f{i}.o"}}}}}}"#
+            ),
+        );
+    }
+    for i in 0..250u32 {
+        push(
+            12,
+            &scanner,
+            "open",
+            format!(
+                r#"{{"fflag":1,"file":{}}}"#,
+                file(&format!("{project}/src/m{i}.rs"))
+            ),
+        );
+        push(
+            13,
+            &formatter,
+            "close",
+            format!(
+                r#"{{"modified":true,"target":{}}}"#,
+                file(&format!("{project}/src/m{i}.rs"))
+            ),
+        );
+    }
+    push(
+        14,
+        &compiler,
+        "open",
+        format!(
+            r#"{{"fflag":1,"file":{}}}"#,
+            file(&format!("{project}/target/.env"))
+        ),
+    );
+    push(
+        14,
+        &agent,
+        "open",
+        format!(
+            r#"{{"fflag":1,"file":{}}}"#,
+            file(&format!("{project}/target/debug/build.log"))
+        ),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// (process_path, action, target, count, flags).
+type Row = (String, String, String, i64, String);
+
+#[test]
+fn build_output_and_bulk_scans_are_rolled_up() {
+    let dir = TempDir::new("rollup");
+    let (out, db) = run_stdin(&dir, &build_stream(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let store = Store::open_read_only(&db).unwrap();
+    let report = store.verify().unwrap();
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT process_path, action, target, count, flags FROM events ORDER BY seq")
+        .unwrap();
+    let all: Vec<Row> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(report.total as usize, all.len());
+    let by = |exe: &str, action: &str| -> Vec<&Row> {
+        all.iter()
+            .filter(|r| r.0.ends_with(exe) && r.1 == action)
+            .collect()
+    };
+
+    // Rule 1: 3,000 creates in one window become one row.
+    let creates = by("/rustc", "create");
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(
+        creates[0].2,
+        "/Users/test/projects/demo/target/** (3000 files)"
+    );
+    assert_eq!(creates[0].3, 3_000);
+    assert!(creates[0].4.contains("rolled_up"));
+
+    // Rule 2: the scanner keeps 100 individual reads, the other 150 roll up under src/.
+    let reads = by("/git", "read");
+    let (rolled, individual): (Vec<&&Row>, Vec<&&Row>) =
+        reads.iter().partition(|r| r.4.contains("rolled_up"));
+    assert_eq!(individual.len(), 100);
+    assert_eq!(rolled.len(), 1);
+    assert_eq!(rolled[0].2, "/Users/test/projects/demo/src/** (150 files)");
+    assert_eq!(rolled[0].3, 150);
+
+    // Writes outside roll-up folders stay one row per file.
+    let writes = by("/rustfmt", "write");
+    assert_eq!(writes.len(), 250);
+    assert!(writes.iter().all(|r| !r.4.contains("rolled_up")));
+
+    // Never rolled up: a sensitive path inside target/, the agent's own read, the command.
+    let env = by("/rustc", "read");
+    assert_eq!(env.len(), 1);
+    assert!(env[0].2.ends_with("/target/.env") && env[0].4.contains("sensitive_path"));
+    let agent = by("/2.4.1", "read");
+    assert_eq!(agent.len(), 1);
+    assert!(agent[0].2.ends_with("/target/debug/build.log"));
+    assert_eq!(by("/2.4.1", "exec").len(), 1);
+
+    // 1 exec + 1 create + 101 reads + 250 writes + 2 kept reads instead of 3,503 rows.
+    assert_eq!(all.len(), 355, "{all:?}");
 }

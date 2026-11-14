@@ -18,6 +18,26 @@ const MAX_SIGNING_ID: usize = 255;
 /// Longest accepted path or path pattern, in bytes. Same bound as core's `MAX_PATH`.
 const MAX_PATTERN: usize = thadam_core::model::MAX_PATH;
 
+/// Folder names whose contents are rolled up inside a project (ADR-005 Rule 1). Generic
+/// names such as `build` and `dist` are left out: they too often hold real files.
+const DEFAULT_ROLLUP_NAMES: &[&str] = &[
+    "target",
+    "node_modules",
+    ".build",
+    "__pycache__",
+    ".gradle",
+    "DerivedData",
+];
+/// Dependency and toolchain caches, rolled up wherever they are (ADR-005 Rule 1).
+const DEFAULT_ROLLUP_PATHS: &[&str] = &["~/.cargo/registry/", "~/.rustup/", "~/.npm/"];
+/// Individual reads per process per window before the rest are rolled up (ADR-005 Rule 2).
+/// An estimate: on live run 3 it rolled up 12,202 scan reads and left normal reads alone.
+pub const DEFAULT_READ_BUDGET: usize = 100;
+/// Largest accepted read budget (estimate; above this the rule has no effect in practice).
+const MAX_READ_BUDGET: usize = 100_000;
+/// Longest accepted roll-up folder name, in bytes (the usual file name limit).
+const MAX_NAME: usize = 255;
+
 #[derive(Debug, Error)]
 pub enum RegistryError {
     #[error("cannot read registry file: {0}")]
@@ -48,6 +68,22 @@ impl PathPattern {
             Some(rest) => PathPattern::Home(rest.to_string()),
             None => PathPattern::Absolute(text.to_string()),
         }
+    }
+
+    /// The part of `path` the pattern matched, without a trailing `/`, when `path` lies
+    /// under it. For `~/x/` and `/Users/dev/x/y` that is `/Users/dev/x`.
+    pub fn matched_prefix<'p>(&self, path: &'p str) -> Option<&'p str> {
+        if !self.contains(path) {
+            return None;
+        }
+        let len = match self {
+            PathPattern::Absolute(prefix) => prefix.trim_end_matches('/').len(),
+            PathPattern::Home(rest) => {
+                let relative = home_relative(path)?;
+                (path.len() - relative.len()) + rest.trim_end_matches('/').len()
+            }
+        };
+        path.get(..len)
     }
 
     /// True when `path` is the pattern itself or lies under it.
@@ -146,6 +182,9 @@ pub struct Registry {
     not_outside: Vec<PathPattern>,
     sensitive: Vec<PathPattern>,
     responsible_attribution: bool,
+    rollup_names: Vec<String>,
+    rollup_paths: Vec<PathPattern>,
+    read_budget: usize,
 }
 
 impl Registry {
@@ -197,6 +236,17 @@ impl Registry {
                 .map(|p| PathPattern::parse(p))
                 .collect(),
             responsible_attribution: file.attribution.responsible_process,
+            rollup_names: DEFAULT_ROLLUP_NAMES
+                .iter()
+                .map(|n| (*n).to_string())
+                .chain(file.rollup.folder_names)
+                .collect(),
+            rollup_paths: DEFAULT_ROLLUP_PATHS
+                .iter()
+                .map(|p| PathPattern::parse(p))
+                .chain(file.rollup.paths.iter().map(|p| PathPattern::parse(p)))
+                .collect(),
+            read_budget: file.rollup.read_budget,
         })
     }
 
@@ -233,6 +283,21 @@ impl Registry {
     pub fn responsible_attribution(&self) -> bool {
         self.responsible_attribution
     }
+
+    /// Folder names rolled up inside a project, defaults included (ADR-005 Rule 1).
+    pub fn rollup_names(&self) -> &[String] {
+        &self.rollup_names
+    }
+
+    /// Path prefixes rolled up anywhere, defaults included (ADR-005 Rule 1).
+    pub fn rollup_paths(&self) -> &[PathPattern] {
+        &self.rollup_paths
+    }
+
+    /// Individual reads per process per window (ADR-005 Rule 2).
+    pub fn read_budget(&self) -> usize {
+        self.read_budget
+    }
 }
 
 /// serde_json's message can quote part of the input for some errors; keep only the
@@ -262,6 +327,9 @@ struct RegistryFile {
     #[serde(default)]
     #[garde(skip)]
     attribution: AttributionEntry,
+    #[serde(default)]
+    #[garde(dive)]
+    rollup: RollupEntry,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -325,6 +393,35 @@ struct PathsEntry {
     sensitive: Vec<String>,
 }
 
+/// Extends the built-in roll-up lists; it can't remove defaults (ADR-005 Decision 1).
+#[derive(Debug, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+struct RollupEntry {
+    #[serde(default)]
+    #[garde(inner(length(min = 1, max = MAX_NAME), custom(folder_name)))]
+    folder_names: Vec<String>,
+    #[serde(default)]
+    #[garde(inner(custom(path_pattern)))]
+    paths: Vec<String>,
+    #[serde(default = "default_read_budget")]
+    #[garde(range(min = 1, max = MAX_READ_BUDGET))]
+    read_budget: usize,
+}
+
+impl Default for RollupEntry {
+    fn default() -> Self {
+        Self {
+            folder_names: Vec::new(),
+            paths: Vec::new(),
+            read_budget: DEFAULT_READ_BUDGET,
+        }
+    }
+}
+
+fn default_read_budget() -> usize {
+    DEFAULT_READ_BUDGET
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AttributionEntry {
@@ -376,6 +473,14 @@ fn printable(value: &str, _ctx: &()) -> garde::Result {
         Ok(())
     } else {
         Err(garde::Error::new("must not contain control characters"))
+    }
+}
+
+fn folder_name(value: &str, _ctx: &()) -> garde::Result {
+    if value.contains('/') || value == "." || value == ".." || value.chars().any(char::is_control) {
+        Err(garde::Error::new("must be a single folder name"))
+    } else {
+        Ok(())
     }
 }
 
@@ -526,6 +631,52 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn rollup_lists_extend_the_defaults() {
+        let r = Registry::parse(
+            r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}]}],
+                "rollup":{"folder_names":["build"],"paths":["/opt/cache/"],"read_budget":50}}"#,
+        )
+        .unwrap();
+        assert!(r.rollup_names().iter().any(|n| n == "target"));
+        assert!(r.rollup_names().iter().any(|n| n == "build"));
+        assert!(r.rollup_paths().iter().any(|p| p.contains("/opt/cache/a")));
+        assert!(
+            r.rollup_paths()
+                .iter()
+                .any(|p| p.contains("/Users/test/.cargo/registry/x"))
+        );
+        assert_eq!(r.read_budget(), 50);
+        let d = Registry::parse(r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}]}]}"#)
+            .unwrap();
+        assert_eq!(d.read_budget(), DEFAULT_READ_BUDGET);
+
+        for bad in [
+            r#""rollup":{"folder_names":["a/b"]}"#,
+            r#""rollup":{"folder_names":[""]}"#,
+            r#""rollup":{"paths":["rel/"]}"#,
+            r#""rollup":{"read_budget":0}"#,
+            r#""rollup":{"exclude":["target"]}"#,
+        ] {
+            let json = format!(
+                r#"{{"version":1,"tools":[{{"key":"t","match":[{{"path":"/x"}}]}}],{bad}}}"#
+            );
+            assert!(Registry::parse(&json).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn matched_prefix_returns_the_concrete_folder() {
+        let home = PathPattern::parse("~/.cargo/registry/");
+        assert_eq!(
+            home.matched_prefix("/Users/test/.cargo/registry/src/x/lib.rs"),
+            Some("/Users/test/.cargo/registry")
+        );
+        let abs = PathPattern::parse("/opt/cache/");
+        assert_eq!(abs.matched_prefix("/opt/cache/a/b"), Some("/opt/cache"));
+        assert_eq!(abs.matched_prefix("/opt/cachex/a"), None);
     }
 
     #[test]

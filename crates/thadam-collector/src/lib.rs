@@ -5,6 +5,7 @@ pub mod classify;
 pub mod collapse;
 pub mod pipeline;
 pub mod registry;
+pub mod rollup;
 pub mod run;
 pub mod snapshot;
 pub mod source;
