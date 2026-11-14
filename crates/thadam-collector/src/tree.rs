@@ -1,0 +1,481 @@
+//! Process tree (ADR-003 Decision 3): which processes belong to which AI tool session.
+//!
+//! Only member processes are stored; the rest of the system's processes (96.7% of events
+//! in Phase 0) are never kept.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use uuid::Uuid;
+
+use crate::registry::{Registry, ToolId, home_relative};
+use crate::snapshot::Snapshot;
+use crate::source::{EventKind, OsEvent, ProcessRef};
+
+/// The session a process belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Membership {
+    pub tool: ToolId,
+    pub session_id: Arc<str>,
+    pub project: Option<Arc<str>>,
+    pub root_pid: u32,
+}
+
+#[derive(Debug, Clone)]
+struct Entry {
+    /// `None` for processes seeded from the snapshot, until their first event says.
+    pidversion: Option<u32>,
+    membership: Membership,
+}
+
+/// What the tree concluded from one event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Observation {
+    /// Membership of the process the event is about, after the event (after exec, the
+    /// new image's).
+    pub member: Option<Membership>,
+    /// Set when the event was the exit of a session root.
+    pub session_ended: Option<Arc<str>>,
+}
+
+#[derive(Debug, Default)]
+pub struct ProcessTree {
+    members: HashMap<u32, Entry>,
+    responsible_attribution: bool,
+}
+
+impl ProcessTree {
+    pub fn new(responsible_attribution: bool) -> Self {
+        Self {
+            members: HashMap::new(),
+            responsible_attribution,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Seeds membership from the start-up snapshot. A root nested under a root of the same
+    /// tool joins the outer session, as it would have if its exec had been observed.
+    pub fn seed(&mut self, snapshot: &Snapshot) {
+        let mut sessions: HashMap<u32, Membership> = HashMap::new();
+        for root in &snapshot.roots {
+            let outer = enclosing_same_tool(snapshot, &sessions, root.pid, root.tool);
+            let membership = outer.unwrap_or_else(|| Membership {
+                tool: root.tool,
+                session_id: new_session_id(),
+                project: project_from_cwd(root.cwd.as_deref()),
+                root_pid: root.pid,
+            });
+            sessions.insert(root.pid, membership);
+        }
+        for (pid, root) in &snapshot.members {
+            if let Some(m) = sessions.get(root) {
+                self.members.insert(
+                    *pid,
+                    Entry {
+                        pidversion: None,
+                        membership: m.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Updates the tree with one event and reports the membership it implies.
+    pub fn observe(&mut self, event: &OsEvent, registry: &Registry) -> Observation {
+        let current = self.resolve(&event.process);
+        match &event.kind {
+            EventKind::Exec { target, cwd, .. } => {
+                let member = match registry.match_identity(&target.executable, &target.identity) {
+                    Some(tool) if current.as_ref().is_some_and(|m| m.tool == tool) => current,
+                    Some(tool) => Some(Membership {
+                        tool,
+                        session_id: new_session_id(),
+                        project: project_from_cwd(cwd.as_deref()),
+                        root_pid: event.process.pid,
+                    }),
+                    None => current,
+                };
+                if let Some(m) = &member {
+                    self.insert(event.process.pid, target.pidversion, m.clone());
+                }
+                Observation {
+                    member,
+                    session_ended: None,
+                }
+            }
+            EventKind::Fork { child } => {
+                if let Some(m) = &current {
+                    self.insert(child.pid, child.pidversion, m.clone());
+                }
+                Observation {
+                    member: current,
+                    session_ended: None,
+                }
+            }
+            EventKind::Exit => {
+                let session_ended = current.as_ref().and_then(|m| {
+                    (m.root_pid == event.process.pid).then(|| Arc::clone(&m.session_id))
+                });
+                self.members.remove(&event.process.pid);
+                Observation {
+                    member: current,
+                    session_ended,
+                }
+            }
+            _ => Observation {
+                member: current,
+                session_ended: None,
+            },
+        }
+    }
+
+    /// Membership of the process an event is about. Falls back to its parent (a missed
+    /// fork) and then to the process the OS holds responsible (helpers started by the
+    /// system launcher), and remembers the result.
+    fn resolve(&mut self, process: &ProcessRef) -> Option<Membership> {
+        if let Some(entry) = self.members.get_mut(&process.pid) {
+            match entry.pidversion {
+                Some(v) if v == process.pidversion => return Some(entry.membership.clone()),
+                None => {
+                    entry.pidversion = Some(process.pidversion);
+                    return Some(entry.membership.clone());
+                }
+                // The pid was reused by a process we never saw start.
+                Some(_) => {
+                    self.members.remove(&process.pid);
+                }
+            }
+        }
+        let inherited = self
+            .members
+            .get(&process.ppid)
+            .filter(|_| process.ppid != process.pid)
+            .or_else(|| {
+                process
+                    .responsible_pid
+                    .filter(|_| self.responsible_attribution)
+                    .and_then(|r| self.members.get(&r))
+            })
+            .map(|e| e.membership.clone())?;
+        self.insert(process.pid, process.pidversion, inherited.clone());
+        Some(inherited)
+    }
+
+    fn insert(&mut self, pid: u32, pidversion: u32, membership: Membership) {
+        self.members.insert(
+            pid,
+            Entry {
+                pidversion: Some(pidversion),
+                membership,
+            },
+        );
+    }
+}
+
+/// For a nested root: the session of the enclosing root, if that root is the same tool. The
+/// root's own member entry points to itself, so look at its parent's. Roots arrive ancestors
+/// first, so the enclosing session is already in `sessions`.
+fn enclosing_same_tool(
+    snapshot: &Snapshot,
+    sessions: &HashMap<u32, Membership>,
+    root_pid: u32,
+    tool: ToolId,
+) -> Option<Membership> {
+    let parent = snapshot.parents.get(&root_pid)?;
+    let outer_root = snapshot.members.get(parent)?;
+    sessions.get(outer_root).filter(|m| m.tool == tool).cloned()
+}
+
+fn new_session_id() -> Arc<str> {
+    Arc::from(Uuid::now_v7().hyphenated().to_string())
+}
+
+/// The session's project folder: the root's working directory, unless that is `/` or a
+/// home folder, which would make every path look like it is outside a project.
+pub fn project_from_cwd(cwd: Option<&str>) -> Option<Arc<str>> {
+    let cwd = cwd?;
+    let trimmed = cwd.strip_suffix('/').unwrap_or(cwd);
+    if trimmed.is_empty() || !trimmed.starts_with('/') || trimmed == "/var/root" {
+        return None;
+    }
+    let with_slash = format!("{trimmed}/");
+    if home_relative(&with_slash) == Some("") {
+        return None;
+    }
+    Some(Arc::from(trimmed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::SnapshotRoot;
+    use crate::source::Identity;
+    use time::macros::datetime;
+
+    fn registry(responsible: bool) -> Registry {
+        Registry::parse(&format!(
+            r#"{{"version":1,"tools":[
+              {{"key":"cli_agent","match":[{{"team_id":"TEAM000001","signing_id":"com.example.cli-agent"}}]}},
+              {{"key":"other_agent","match":[{{"team_id":"TEAM000002","signing_id":"com.example.other"}}]}}
+            ],"attribution":{{"responsible_process":{responsible}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn proc(pid: u32, ppid: u32, exe: &str) -> ProcessRef {
+        ProcessRef {
+            pid,
+            pidversion: 1,
+            ppid,
+            responsible_pid: None,
+            executable: exe.into(),
+            identity: Identity::default(),
+        }
+    }
+
+    fn signed(mut p: ProcessRef, team: &str, id: &str) -> ProcessRef {
+        p.identity = Identity {
+            team_id: Some(team.into()),
+            signing_id: Some(id.into()),
+            platform: false,
+        };
+        p
+    }
+
+    fn ev(process: ProcessRef, kind: EventKind) -> OsEvent {
+        OsEvent {
+            ts: datetime!(2026-11-14 09:33:00 UTC),
+            seq: 1,
+            process,
+            kind,
+        }
+    }
+
+    fn exec_agent(pid: u32, ppid: u32, cwd: &str) -> OsEvent {
+        let target = signed(
+            proc(pid, ppid, "/Users/test/.local/bin/2.4.1"),
+            "TEAM000001",
+            "com.example.cli-agent",
+        );
+        ev(
+            proc(pid, ppid, "/bin/zsh"),
+            EventKind::Exec {
+                target,
+                args: vec!["agent".into()],
+                cwd: Some(cwd.into()),
+            },
+        )
+    }
+
+    fn fork(parent: u32, child: u32) -> OsEvent {
+        ev(
+            proc(parent, 1, "/x"),
+            EventKind::Fork {
+                child: proc(child, parent, "/x"),
+            },
+        )
+    }
+
+    fn open(p: ProcessRef) -> OsEvent {
+        ev(
+            p,
+            EventKind::Open {
+                path: "/tmp/x".into(),
+                readable: true,
+                size: None,
+            },
+        )
+    }
+
+    #[test]
+    fn exec_of_registered_identity_starts_a_session_and_children_join() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/projects/demo"), &r)
+            .member
+            .unwrap();
+        assert_eq!(root.project.as_deref(), Some("/Users/test/projects/demo"));
+        assert_eq!(root.root_pid, 300);
+
+        t.observe(&fork(300, 301), &r);
+        t.observe(&fork(301, 302), &r);
+        let grandchild = t
+            .observe(&open(proc(302, 301, "/usr/bin/cat")), &r)
+            .member
+            .unwrap();
+        assert_eq!(grandchild.session_id, root.session_id);
+        assert!(
+            t.observe(&open(proc(999, 1, "/bin/x")), &r)
+                .member
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missed_fork_is_recovered_from_ppid() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        let m = t
+            .observe(&open(proc(450, 300, "/bin/cat")), &r)
+            .member
+            .unwrap();
+        assert_eq!(m.session_id, root.session_id);
+    }
+
+    #[test]
+    fn responsible_process_attribution_follows_config() {
+        let r = registry(true);
+        let mut helper = proc(800, 1, "/Applications/X.app/helper");
+        helper.responsible_pid = Some(300);
+
+        let mut on = ProcessTree::new(true);
+        on.observe(&exec_agent(300, 200, "/Users/test/p"), &r);
+        assert!(on.observe(&open(helper.clone()), &r).member.is_some());
+
+        let mut off = ProcessTree::new(false);
+        off.observe(&exec_agent(300, 200, "/Users/test/p"), &r);
+        assert!(off.observe(&open(helper), &r).member.is_none());
+    }
+
+    #[test]
+    fn nested_same_tool_stays_and_different_tool_starts_new_session() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        t.observe(&fork(300, 310), &r);
+        let same = t
+            .observe(&exec_agent(310, 300, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        assert_eq!(same.session_id, root.session_id);
+
+        t.observe(&fork(300, 320), &r);
+        let target = signed(
+            proc(320, 300, "/opt/other"),
+            "TEAM000002",
+            "com.example.other",
+        );
+        let other = t
+            .observe(
+                &ev(
+                    proc(320, 300, "/x"),
+                    EventKind::Exec {
+                        target,
+                        args: vec![],
+                        cwd: None,
+                    },
+                ),
+                &r,
+            )
+            .member
+            .unwrap();
+        assert_ne!(other.session_id, root.session_id);
+        assert_eq!(r.tool(other.tool).unwrap().key, "other_agent");
+        assert_eq!(other.project, None);
+    }
+
+    #[test]
+    fn root_exit_ends_session_and_reused_pid_is_not_attributed() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        t.observe(&fork(300, 301), &r);
+        let exit_child = t.observe(&ev(proc(301, 300, "/x"), EventKind::Exit), &r);
+        assert_eq!(exit_child.session_ended, None);
+        let exit_root = t.observe(&ev(proc(300, 200, "/x"), EventKind::Exit), &r);
+        assert_eq!(exit_root.session_ended, Some(root.session_id));
+        // pid 301 reused by an unrelated process whose parent is not a member.
+        assert!(
+            t.observe(&open(proc(301, 1, "/bin/x")), &r)
+                .member
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_pidversion_drops_membership() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        t.observe(&exec_agent(300, 200, "/Users/test/p"), &r);
+        t.observe(&fork(300, 301), &r);
+        let mut reused = proc(301, 1, "/bin/x");
+        reused.pidversion = 9;
+        assert!(t.observe(&open(reused), &r).member.is_none());
+    }
+
+    #[test]
+    fn snapshot_seed_attributes_existing_processes() {
+        let r = registry(true);
+        let tool = r
+            .match_identity(
+                "/x",
+                &signed(proc(1, 0, "/x"), "TEAM000001", "com.example.cli-agent").identity,
+            )
+            .unwrap();
+        let mut snap = Snapshot::default();
+        snap.roots.push(SnapshotRoot {
+            pid: 300,
+            tool,
+            cwd: Some("/Users/test/p".into()),
+        });
+        snap.roots.push(SnapshotRoot {
+            pid: 310,
+            tool,
+            cwd: Some("/Users/test/p".into()),
+        });
+        for (pid, root, parent) in [
+            (300, 300, 200),
+            (310, 310, 300),
+            (400, 300, 300),
+            (500, 310, 310),
+        ] {
+            snap.members.insert(pid, root);
+            snap.parents.insert(pid, parent);
+        }
+        let mut t = ProcessTree::new(true);
+        t.seed(&snap);
+        let a = t
+            .observe(&open(proc(500, 310, "/bin/x")), &r)
+            .member
+            .unwrap();
+        let b = t
+            .observe(&open(proc(400, 300, "/bin/x")), &r)
+            .member
+            .unwrap();
+        assert_eq!(
+            a.session_id, b.session_id,
+            "nested same-tool root joins the outer session"
+        );
+        assert_eq!(a.project.as_deref(), Some("/Users/test/p"));
+    }
+
+    #[test]
+    fn project_ignores_root_and_home() {
+        assert_eq!(project_from_cwd(Some("/")), None);
+        assert_eq!(project_from_cwd(Some("/Users/test")), None);
+        assert_eq!(project_from_cwd(Some("/Users/test/")), None);
+        assert_eq!(project_from_cwd(None), None);
+        assert_eq!(
+            project_from_cwd(Some("/Users/test/projects/demo/")).as_deref(),
+            Some("/Users/test/projects/demo")
+        );
+    }
+}

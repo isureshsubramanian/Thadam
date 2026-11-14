@@ -1,0 +1,24 @@
+[package]
+name = "thadam-collector"
+description = "Collector daemon for Thadam: OS events from AI tool process trees into the store."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thadam-core.workspace = true
+thadam-store.workspace = true
+garde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+signal-hook.workspace = true
+thiserror.workspace = true
+time = { workspace = true, features = ["parsing"] }
+uuid.workspace = true
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros", "parsing"] }
+
+[lints]
+workspace = true

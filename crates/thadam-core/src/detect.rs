@@ -29,6 +29,17 @@ impl DetectorKind {
             DetectorKind::UsSsn => "US_SSN",
         }
     }
+
+    /// Which kind labels a merged span when findings overlap. A secret always wins, so a
+    /// credential is never relabelled as something milder (and loses its flag) just because
+    /// another detector matched more text around it, as an email does in `user:pass@host`.
+    const fn severity(self) -> u8 {
+        match self {
+            DetectorKind::Secret => 3,
+            DetectorKind::UsSsn | DetectorKind::Aadhaar => 2,
+            DetectorKind::Email => 1,
+        }
+    }
 }
 
 /// Finds sensitive values in text. Implementations return the byte ranges to replace; a
@@ -111,8 +122,9 @@ impl Redactor {
     }
 
     /// Replaces every finding with `[TYPE]`. Overlapping findings are merged into one
-    /// replacement, labelled with the kind of the finding that starts first (the longer
-    /// one on a tie), so no part of any finding survives.
+    /// replacement, so no part of any finding survives. The merged span is labelled with
+    /// the most severe kind in it (see `DetectorKind::severity`), and only that kind is
+    /// counted.
     pub fn redact(&self, text: &str) -> Redacted {
         let mut hits: Vec<(Range<usize>, DetectorKind)> = Vec::new();
         for detector in &self.detectors {
@@ -131,7 +143,12 @@ impl Redactor {
         let mut spans: Vec<(Range<usize>, DetectorKind)> = Vec::new();
         for (range, kind) in hits {
             match spans.last_mut() {
-                Some((last, _)) if range.start < last.end => last.end = last.end.max(range.end),
+                Some((last, last_kind)) if range.start < last.end => {
+                    last.end = last.end.max(range.end);
+                    if kind.severity() > last_kind.severity() {
+                        *last_kind = kind;
+                    }
+                }
                 _ => spans.push((range, kind)),
             }
         }
@@ -190,6 +207,26 @@ mod tests {
         let out = r.redact("x=abcdefgh!");
         assert_eq!(out.text, "x=[SECRET]!");
         assert_eq!(out.detections.to_wire(), "SECRET:1");
+    }
+
+    #[test]
+    fn a_secret_inside_a_longer_milder_finding_keeps_its_label() {
+        // Same start, the email is longer: the span is still labelled SECRET.
+        let r = Redactor::new(vec![
+            Box::new(Fixed(DetectorKind::Email, vec![(2, 10)])),
+            Box::new(Fixed(DetectorKind::Secret, vec![(2, 6)])),
+        ]);
+        let out = r.redact("x=abcdefgh!");
+        assert_eq!(out.text, "x=[SECRET]!");
+        assert_eq!(out.detections.to_wire(), "SECRET:1");
+    }
+
+    #[test]
+    fn url_credentials_are_flagged_as_secret_end_to_end() {
+        let r = Redactor::with_default_detectors().unwrap();
+        let out = r.redact("git push https://dev:Hunter2pass@git.example.test/repo");
+        assert!(!out.text.contains("Hunter2pass"), "{}", out.text);
+        assert_eq!(out.detections.get(DetectorKind::Secret), 1, "{}", out.text);
     }
 
     #[test]
