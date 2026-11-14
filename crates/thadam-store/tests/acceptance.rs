@@ -239,6 +239,35 @@ fn exec_environment_never_reaches_the_database() {
 }
 
 #[test]
+fn long_command_line_is_redacted_then_truncated_not_dropped() {
+    use thadam_core::model::{MAX_TARGET, MAX_TARGET_INPUT};
+    let redactor = Redactor::with_default_detectors().unwrap();
+    // A synthetic 100 KB sandbox-style profile with a token straddling the cut point and
+    // another past it. Both are found because redaction runs on the full text first.
+    let mut line = String::from("sandbox-exec -p '");
+    let rule = "(allow file-read* (subpath \"/Users/dev/projects/sample-app\")) ";
+    while line.len() + rule.len() < MAX_TARGET - 60 {
+        line.push_str(rule);
+    }
+    line.push_str(&"x".repeat(MAX_TARGET - 60 - line.len()));
+    // Starts 60 bytes before the limit; the cut lands about 35 bytes before it.
+    line.push_str(" --token=synthTok3nStraddlingTheCut0123 ");
+    line.push_str(&"y".repeat(30_000));
+    line.push_str(" --token=synthTok3nPastTheCut4567' /bin/true");
+    assert!(line.len() > MAX_TARGET);
+
+    let rec = EventRecord::new(command(line.clone()), &redactor).unwrap();
+    assert!(rec.target().len() <= MAX_TARGET, "{}", rec.target().len());
+    assert!(rec.target().ends_with(" bytes in full]"));
+    assert!(!rec.target().contains("synthTok3n"));
+    assert_eq!(rec.detections(), "SECRET:2");
+    assert!(rec.flags().contains(&Flag::SecretPattern));
+
+    let too_big = command("z".repeat(MAX_TARGET_INPUT + 1));
+    assert!(EventRecord::new(too_big, &redactor).is_err());
+}
+
+#[test]
 fn invalid_input_is_rejected_before_storage() {
     let redactor = Redactor::with_default_detectors().unwrap();
     let mut bad_tool = file_read("/x");

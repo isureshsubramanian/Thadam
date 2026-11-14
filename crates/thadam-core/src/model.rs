@@ -19,6 +19,10 @@ pub const MAX_TOOL_KEY: usize = 64;
 pub const MAX_SESSION_ID: usize = 128;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_TARGET: usize = 64 * 1024;
+/// Longest target accepted as input, before truncation to `MAX_TARGET`. Bounds memory, not
+/// stored size. An estimate: the longest command line seen in the live runs of 14 Nov 2026
+/// was 56,338 bytes (a sandbox profile passed inline as an argument).
+pub const MAX_TARGET_INPUT: usize = 1024 * 1024;
 
 /// A value with a stable stored name.
 pub trait WireName: Copy {
@@ -128,8 +132,9 @@ pub struct NewEvent {
     pub category: Category,
     #[garde(skip)]
     pub action: Action,
-    /// Path, command line, host:port or prompt text. Redacted by `EventRecord::new`.
-    #[garde(length(max = MAX_TARGET))]
+    /// Path, command line, host:port or prompt text. Redacted, then truncated to
+    /// `MAX_TARGET`, by `EventRecord::new`.
+    #[garde(length(max = MAX_TARGET_INPUT))]
     pub target: String,
     #[garde(skip)]
     pub outcome: Outcome,
@@ -148,6 +153,22 @@ pub struct NewEvent {
     pub count: u32,
     #[garde(custom(non_empty_sources))]
     pub sources: BTreeSet<Source>,
+}
+
+/// Cuts a target longer than `MAX_TARGET` at a character boundary and says so. Runs after
+/// redaction, so a secret is never cut in half before the detectors have seen all of it.
+fn truncate_target(mut text: String) -> String {
+    if text.len() <= MAX_TARGET {
+        return text;
+    }
+    let marker = format!(" [truncated, {} bytes in full]", text.len());
+    let mut cut = MAX_TARGET.saturating_sub(marker.len());
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    text.push_str(&marker);
+    text
 }
 
 fn tool_key_charset(value: &str, _ctx: &()) -> garde::Result {
@@ -221,7 +242,7 @@ impl EventRecord {
             process_path: input.process_path,
             category: input.category,
             action: input.action,
-            target: redacted.text,
+            target: truncate_target(redacted.text),
             outcome: input.outcome,
             size_bytes: input.size_bytes,
             bytes_out: input.bytes_out,

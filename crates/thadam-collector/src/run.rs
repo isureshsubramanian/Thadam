@@ -8,6 +8,7 @@
 //! reader, then the OS logger buffers: nothing is dropped silently.
 
 use std::io::BufReader;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -58,10 +59,15 @@ pub enum Ended {
 }
 
 /// Starts the built-in logger with JSON output on a pipe.
+///
+/// The logger gets its own process group, so a terminal Ctrl-C reaches only the collector.
+/// The collector then stops the logger itself (`on_stop`) after deciding how to shut down;
+/// otherwise the logger could exit first and look like a crash.
 pub fn spawn_logger() -> std::io::Result<(Child, BufReader<ChildStdout>)> {
     let mut child = Command::new(LOGGER)
         .args(LOGGER_EVENTS)
         .args(["--format", "json"])
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

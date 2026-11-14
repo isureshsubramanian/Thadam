@@ -196,8 +196,10 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     .map_err(|e| Failure::Runtime(e.to_string()))?;
 
     eprintln!("thadam-collector: final {stats}");
+    // A stop request that raced the logger's own exit is still a clean stop.
+    let stopped = stop.load(Ordering::SeqCst);
     match (ended, o.source.as_deref().unwrap_or("eslogger")) {
-        (Ended::EndOfInput, "eslogger") => Err(Failure::Runtime(
+        (Ended::EndOfInput, "eslogger") if !stopped => Err(Failure::Runtime(
             "the OS logger exited; stopping so the service manager can restart".into(),
         )),
         _ => Ok(()),

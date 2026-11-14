@@ -382,3 +382,38 @@ fn usage_and_registry_errors_exit_2_without_values() {
     let (out, _) = run_stdin(&dir, "", &["--window-secs", "0"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn interrupt_stops_cleanly_and_flushes_open_windows() {
+    let dir = TempDir::new("sigint");
+    let db = dir.path("events.db");
+    let mut child = Command::new(BIN)
+        .args(["run", "--source", "stdin", "--registry"])
+        .arg(dir.path("registry.json"))
+        .arg("--store")
+        .arg(&db)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Keep stdin open so the run can only end through the signal.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(sample_stream().as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let status = Command::new("/bin/kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = child.wait_with_output().unwrap();
+    drop(stdin);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The 47-read window was still open when the signal arrived.
+    assert!(rows(&db).iter().any(|r| r.3 == 47));
+}
