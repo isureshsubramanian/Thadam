@@ -1,0 +1,9 @@
+<Project>
+  <!-- No telemetry from the test programs, however they are run (with or without the gate's
+       opt-out variables). The testing platform's telemetry extension registers itself through
+       this item from its package props; removing it here, after those props, keeps it out of the
+       generated entry point. The id is the extension's own (Microsoft.Testing.Extensions.Telemetry). -->
+  <ItemGroup>
+    <TestingPlatformBuilderHook Remove="98058041-B5B6-4A75-9834-58E6DF796A22" />
+  </ItemGroup>
+</Project>
