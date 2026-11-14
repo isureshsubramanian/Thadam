@@ -198,13 +198,15 @@ fn write_all(
     loop {
         match rx.recv_timeout(MAINTAIN_EVERY) {
             Ok(record) => {
-                let was_paused = store.status().paused;
+                let before = store.status();
                 if store.append(&record, now_us())? == Written::Row {
                     written.fetch_add(1, Ordering::Relaxed);
                 }
-                // A rollover runs the limits too, so writing can pause here.
-                if store.status().paused != was_paused {
-                    if !was_paused {
+                // A rollover opens a segment and runs the limits, so the figures (and the
+                // pause state) can change here, not only on the minute.
+                let after = store.status();
+                if after != before {
+                    if after.paused && !before.paused {
                         eprintln!("thadam-collector: disk low, writing paused");
                     }
                     publish(&store);

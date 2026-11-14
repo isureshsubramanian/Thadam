@@ -512,7 +512,10 @@ fn migration_copies_a_single_file_store_without_changing_a_row() {
 
     // The writer continues the chain in a new file for the same week.
     let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    assert_eq!(w.status().segments, 1);
     write(&mut w, &[t], 2);
+    // The status already counts the segment the first row opened.
+    assert_eq!(w.status().segments, 2);
     drop(w);
     assert_eq!(
         segment_files(&tmp.store()),
