@@ -33,7 +33,7 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .brand .name { display: block; font-weight: 700; font-size: 16px; }
 .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 24px; max-width: 1440px; margin: 0 auto; padding: 24px; }
 .side { display: flex; flex-direction: column; gap: 4px; }
-.main { min-width: 0; }
+.main { min-width: 0; container-type: inline-size; }
 .tools { display: flex; flex-direction: column; gap: 6px; margin: 20px 0; padding: 14px 12px; border-top: 1px solid var(--border); }
 .tool { font-size: 13px; }
 
@@ -80,7 +80,11 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
 .tabs { border-bottom: 1px solid var(--border); gap: 0; }
 
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); gap: 12px; }
+.kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.kpis.three { grid-template-columns: minmax(0, 1fr); }
+/* Fixed column counts by the main column's width, so no card sits alone on a row. */
+@container (min-width: 600px) { .kpis, .kpis.three { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (min-width: 840px) { .kpis:not(.three) { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
 .kpi { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px; text-align: left; font: inherit; color: inherit; cursor: pointer; transition: border-color 0.15s; }
 .kpi:hover { border-color: var(--accent); }
 .kpi.static { cursor: default; }
@@ -101,6 +105,9 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .tbl.events .detail { display: block; margin-top: 4px; font-family: var(--font); color: var(--muted); }
 
 .bars, .hosts, .plain { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+/* Long lists scroll inside their card (about ten rows), not the whole page. */
+.scrollbox { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; padding-right: 8px; }
+.scrollbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .barhead, .hosts li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .clip { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .numv { margin-left: auto; font-variant-numeric: tabular-nums; }

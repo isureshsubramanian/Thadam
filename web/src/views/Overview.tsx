@@ -104,11 +104,11 @@ export function Overview({ range }: { range: TimeRange }) {
             {count(data.kpis.outsideProject.records, "record")} in {count(data.kpis.outsideProject.folders, "folder")} · repeated opens collapsed per session
           </p>
           {data.outsideFolders.length === 0 && <Empty>Nothing outside the project.</Empty>}
-          <ul className="bars">
+          <ul className="bars scrollbox" tabIndex={0} aria-label="Folders outside the project">
             {data.outsideFolders.map((f) => (
               <li key={f.folder}>
                 <div className="barhead">
-                  <span className="mono clip">{f.folder}</span>
+                  <span className="mono clip" title={f.folder}>{f.folder}</span>
                   {f.flags.map((fl) => <span key={fl} className="pill flag">{words(fl)}</span>)}
                   <span className="muted">{count(f.tools.length, "tool")}</span>
                   <span className="numv">{num(f.records)}</span>
@@ -125,10 +125,10 @@ export function Overview({ range }: { range: TimeRange }) {
           <h2 id="bydest" className="h2">Where tools connected</h2>
           <p className="sub">{count(data.hosts.length, "host")} · host, port and bytes only, no URLs</p>
           {data.hosts.length === 0 && <Empty>No network activity recorded.</Empty>}
-          <ul className="hosts">
+          <ul className="hosts scrollbox" tabIndex={0} aria-label="Hosts contacted">
             {data.hosts.map((h) => (
               <li key={`${h.target} ${h.category}`}>
-                <span className="mono clip">{h.target}</span>
+                <span className="mono clip" title={h.target}>{h.target}</span>
                 <span className="pill">{categoryName[h.category] ?? words(h.category)}</span>
                 {h.unknown && <span className="pill flag">unknown host</span>}
                 <span className="muted numv">↑ {bytes(h.bytesOut)} · ↓ {bytes(h.bytesIn)}</span>
