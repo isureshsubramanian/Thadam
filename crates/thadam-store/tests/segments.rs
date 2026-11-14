@@ -547,3 +547,53 @@ fn migration_refuses_a_store_that_does_not_verify() {
     assert!(migrate(&old, tmp.store(), us(t)).is_err());
     assert!(!tmp.store().join(CATALOG_FILE).exists());
 }
+
+fn journal_mode(path: &Path) -> String {
+    let conn =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    conn.pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn only_files_being_written_are_in_wal_mode() {
+    let tmp = TempDir::new("journal");
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &four_weeks(), 1);
+    // While the writer runs: closed segments are in the rollback journal, the active one
+    // and the catalog in WAL.
+    assert_eq!(
+        journal_mode(&tmp.store().join("events-2026-W46.db")),
+        "delete"
+    );
+    assert_eq!(journal_mode(&tmp.store().join("events-2026-W47.db")), "wal");
+    assert_eq!(journal_mode(&tmp.store().join(CATALOG_FILE)), "wal");
+    w.finish(us(datetime!(2026-11-18 11:00 UTC))).unwrap();
+    for name in ["events-2026-W47.db", CATALOG_FILE] {
+        assert_eq!(journal_mode(&tmp.store().join(name)), "delete", "{name}");
+    }
+    // A new writer switches back.
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &[datetime!(2026-11-18 12:00 UTC)], 1);
+    assert_eq!(journal_mode(&tmp.store().join("events-2026-W47.db")), "wal");
+}
+
+/// The live finding behind this: a user process could not open the WAL files in the
+/// root-owned folder once the collector had stopped, because it could not create `-shm`.
+#[test]
+fn a_stopped_store_verifies_from_a_folder_the_reader_cannot_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new("readonly-dir");
+    let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut w, &four_weeks(), 2);
+    drop(w);
+    let set = |mode| {
+        std::fs::set_permissions(tmp.store(), std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    set(0o555);
+    let report = verify_dir(tmp.store());
+    set(0o755);
+    let report = report.unwrap();
+    assert_eq!(report.broken, None);
+    assert_eq!(report.verified_rows, 8);
+}

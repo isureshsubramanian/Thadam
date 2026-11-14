@@ -40,6 +40,11 @@ impl Catalog {
         Ok(Self { conn })
     }
 
+    /// See `crate::leave_wal`.
+    pub fn leave_wal(&self) -> Result<(), StoreError> {
+        crate::leave_wal(&self.conn)
+    }
+
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;

@@ -95,6 +95,23 @@ pub enum ChainBreak {
     Unreadable { seq: i64 },
 }
 
+/// Switches a file the writer is done with to the rollback journal (ADR-009 Decision 6).
+///
+/// A reader of a WAL file needs its `-shm` file, and SQLite deletes that when the writer
+/// closes. A reader running as the user cannot create it again in the root-owned store
+/// folder, so a WAL file there is unreadable whenever the collector is stopped. A file in
+/// rollback-journal mode needs no side file. Writers switch back to WAL when they open.
+/// Fails (and leaves WAL) while another connection has the file open.
+pub(crate) fn leave_wal(conn: &Connection) -> Result<(), StoreError> {
+    let mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0))?;
+    if mode.eq_ignore_ascii_case("delete") {
+        Ok(())
+    } else {
+        Err(StoreError::Layout(format!("journal mode stayed {mode}")))
+    }
+}
+
 /// Result of walking the chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReport {
@@ -123,6 +140,12 @@ impl Store {
         conn.pragma_update(None, "synchronous", "FULL")?;
         schema::apply(&conn)?;
         Ok(Self { conn, start })
+    }
+
+    /// Switches the file from WAL to the rollback journal before the writer closes it.
+    /// See `leave_wal`.
+    pub fn leave_wal(&self) -> Result<(), StoreError> {
+        leave_wal(&self.conn)
     }
 
     /// Opens an existing store without the ability to write, for verification and reads.

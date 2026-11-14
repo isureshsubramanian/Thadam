@@ -136,7 +136,12 @@ impl SegmentWriter {
                 CatalogKind::Closed if !path.exists() => {
                     warnings.push(format!("{}: closed segment missing, not retired", seg.name));
                 }
-                CatalogKind::Closed => closed.push(seg.clone()),
+                CatalogKind::Closed => {
+                    if let Err(e) = leave_wal_file(&path) {
+                        warnings.push(format!("{}: still in WAL mode: {e}", seg.name));
+                    }
+                    closed.push(seg.clone());
+                }
                 CatalogKind::Opened => opened.push(seg.clone()),
                 _ => {}
             }
@@ -272,9 +277,15 @@ impl SegmentWriter {
         Ok(())
     }
 
-    /// At shutdown: records an unfinished pause so the gap is never silent.
+    /// At shutdown: records an unfinished pause so the gap is never silent, then leaves
+    /// the files readable without the writer (`Drop` does the same, best effort, on other
+    /// exits).
     pub fn finish(mut self, now_us: i64) -> Result<(), StoreError> {
-        self.resume(now_us)
+        self.resume(now_us)?;
+        if let Some(a) = &self.active {
+            a.store.leave_wal()?;
+        }
+        self.catalog.leave_wal()
     }
 
     fn resume(&mut self, now_us: i64) -> Result<(), StoreError> {
@@ -333,6 +344,9 @@ impl SegmentWriter {
             ts_us: now_us,
         });
         // Closing the connection checkpoints the WAL into the file before it is measured.
+        // A closed segment is never written again, so it leaves WAL for good. If a reader
+        // holds it now, `open` retries at the next start.
+        let _ = active.store.leave_wal();
         drop(active.store);
         let path = self.dir.join(&active.name);
         let bytes = segment_bytes(&path);
@@ -419,6 +433,18 @@ impl SegmentWriter {
         self.status.store_bytes = self.store_bytes();
         self.status.segments = self.closed.len() + usize::from(self.active.is_some());
         self.status.paused = self.pause.is_some();
+    }
+}
+
+impl Drop for SegmentWriter {
+    /// Leaves WAL on every exit path, so a stopped collector never leaves the store
+    /// unreadable to the user (see `crate::leave_wal`). Errors are ignored: after a crash
+    /// or a failed switch the `-wal` and `-shm` files stay, and readers can use those.
+    fn drop(&mut self) {
+        if let Some(a) = &self.active {
+            let _ = a.store.leave_wal();
+        }
+        let _ = self.catalog.leave_wal();
     }
 }
 
@@ -753,6 +779,12 @@ fn unique_name(dir: &Path, (year, week): (i32, u8), known: &[String]) -> String 
         .map(|i| format!("{base}-{i}.db"))
         .find(|n| !taken(n))
         .unwrap_or(first)
+}
+
+/// Switches a closed segment to the rollback journal if it is still in WAL.
+fn leave_wal_file(path: &Path) -> Result<(), StoreError> {
+    let conn = rusqlite::Connection::open(path)?;
+    crate::leave_wal(&conn)
 }
 
 fn from_hex(s: &str) -> Option<[u8; 32]> {
