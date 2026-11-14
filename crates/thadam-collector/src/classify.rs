@@ -49,11 +49,21 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
                 vec![],
             )
         }
+        // A write open becomes a row only if it is refused (ADR-006); a successful write is
+        // recorded from its close.
         EventKind::Open {
             path,
-            readable: true,
+            readable,
+            writable,
             size,
-        } => file(Action::Read, path, *size, event),
+        } if *readable || *writable => {
+            let action = if *readable {
+                Action::Read
+            } else {
+                Action::Write
+            };
+            file(action, path, *size, event)
+        }
         EventKind::Close {
             path,
             modified: true,
@@ -214,6 +224,7 @@ mod tests {
         EventKind::Open {
             path: path.into(),
             readable: true,
+            writable: false,
             size: Some(10),
         }
     }
@@ -233,12 +244,21 @@ mod tests {
         let m = member(&r, PROJECT);
         let action = |k: EventKind| classify(&ev(k), &m, &r).map(|e| (e.category, e.action));
         assert_eq!(action(read("/a")), Some((Category::File, Action::Read)));
-        let write_only = EventKind::Open {
+        let open = |readable, writable| EventKind::Open {
             path: "/a".into(),
-            readable: false,
+            readable,
+            writable,
             size: None,
         };
-        assert_eq!(action(write_only), None);
+        assert_eq!(
+            action(open(false, true)),
+            Some((Category::File, Action::Write))
+        );
+        assert_eq!(
+            action(open(true, true)),
+            Some((Category::File, Action::Read))
+        );
+        assert_eq!(action(open(false, false)), None);
         let close = |modified| EventKind::Close {
             path: "/a".into(),
             modified,

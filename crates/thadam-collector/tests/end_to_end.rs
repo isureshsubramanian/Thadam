@@ -161,7 +161,32 @@ fn sample_stream() -> String {
     lines.push(line(next(0), 25, &unrelated, "mmap", "{}"));
     // The OS dropped 10 events here.
     lines.push(line(next(10), 26, &child, "exit", r#"{"stat":0}"#));
-    lines.join("\n") + "\n"
+    with_closes(&(lines.join("\n") + "\n"))
+}
+
+/// Adds the close that follows every successful open, as the OS logger reports it, and
+/// renumbers the sequence so existing gaps stay where they were (ADR-006: a read is recorded
+/// once its close is seen).
+fn with_closes(stream: &str) -> String {
+    let mut out = Vec::new();
+    let mut added = 0u64;
+    for text in stream.lines() {
+        let Ok(mut event) = serde_json::from_str::<serde_json::Value>(text) else {
+            out.push(text.to_string());
+            continue;
+        };
+        let seq = event["global_seq_num"].as_u64().unwrap() + added;
+        event["global_seq_num"] = seq.into();
+        let close = event["event"]["open"]["file"].clone();
+        out.push(event.to_string());
+        if !close.is_null() {
+            added += 1;
+            event["global_seq_num"] = (seq + 1).into();
+            event["event"] = serde_json::json!({"close": {"modified": false, "target": close}});
+            out.push(event.to_string());
+        }
+    }
+    out.join("\n") + "\n"
 }
 
 fn run_stdin(dir: &TempDir, input: &str, extra: &[&str]) -> (std::process::Output, PathBuf) {
@@ -575,7 +600,7 @@ fn build_stream() -> String {
             file(&format!("{project}/target/debug/build.log"))
         ),
     );
-    lines.join("\n") + "\n"
+    with_closes(&(lines.join("\n") + "\n"))
 }
 
 /// (process_path, action, target, count, flags).
@@ -646,4 +671,100 @@ fn build_output_and_bulk_scans_are_rolled_up() {
 
     // 1 exec + 1 create + 101 reads + 250 writes + 2 kept reads instead of 3,503 rows.
     assert_eq!(all.len(), 355, "{all:?}");
+}
+
+/// ADR-006 acceptance: an open the OS refused has no close. The agent's twelve attempts and
+/// `cat`'s one become `denied_by_os` rows, not reads; a closed open stays an allowed read.
+#[test]
+fn refused_opens_are_recorded_as_denied_by_os() {
+    let shell = process(4211, 4100, "/bin/zsh", false);
+    let agent = process(4211, 4100, "/Users/test/.local/bin/2.4.1", true);
+    let cat = process(4800, 4211, "/bin/cat", false);
+    let locked = file("/Users/test/outside/locked.txt");
+    let notes = file("/Users/test/outside/notes.txt");
+    let mut seq = 100u64;
+    let mut lines = Vec::new();
+    let mut push = |secs: u32, proc_json: &str, kind: &str, body: String| {
+        seq += 1;
+        lines.push(line(seq, secs, proc_json, kind, &body));
+    };
+    push(
+        0,
+        &shell,
+        "exec",
+        format!(
+            r#"{{"target":{agent},"args":["agent"],"env":[],"cwd":{}}}"#,
+            file("/Users/test/projects/demo")
+        ),
+    );
+    for _ in 0..12 {
+        push(
+            1,
+            &agent,
+            "open",
+            format!(r#"{{"fflag":1,"file":{locked}}}"#),
+        );
+    }
+    push(
+        2,
+        &agent,
+        "open",
+        format!(r#"{{"fflag":1,"file":{notes}}}"#),
+    );
+    push(
+        2,
+        &agent,
+        "close",
+        format!(r#"{{"modified":false,"target":{notes}}}"#),
+    );
+    push(3, &agent, "fork", format!(r#"{{"child":{cat}}}"#));
+    push(3, &cat, "open", format!(r#"{{"fflag":1,"file":{locked}}}"#));
+    push(3, &cat, "exit", r#"{"stat":256}"#.into());
+    push(4, &agent, "exit", r#"{"stat":0}"#.into());
+    let input = lines.join("\n") + "\n";
+
+    let dir = TempDir::new("refused");
+    let (out, db) = run_stdin(&dir, &input, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let store = Store::open_read_only(&db).unwrap();
+    store.verify().unwrap();
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT process_path, action, outcome, target, count, size_bytes FROM events WHERE category = 'file' ORDER BY seq")
+        .unwrap();
+    let rows: Vec<(String, String, String, String, i64, Option<i64>)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let find = |exe: &str, target: &str| {
+        rows.iter()
+            .find(|r| r.0.ends_with(exe) && r.3.ends_with(target))
+            .unwrap_or_else(|| panic!("{exe} {target}: {rows:?}"))
+    };
+    let agent_locked = find("/2.4.1", "/locked.txt");
+    assert_eq!(
+        (agent_locked.1.as_str(), agent_locked.2.as_str()),
+        ("read", "denied_by_os")
+    );
+    assert_eq!(agent_locked.4, 12);
+    assert_eq!(agent_locked.5, None);
+    let cat_locked = find("/cat", "/locked.txt");
+    assert_eq!(cat_locked.2, "denied_by_os");
+    let agent_notes = find("/2.4.1", "/notes.txt");
+    assert_eq!(agent_notes.2, "allowed");
+    assert_eq!(rows.len(), 3, "{rows:?}");
 }

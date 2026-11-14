@@ -3,7 +3,7 @@
 //! This module only decides eligibility. `collapse.rs` applies it: it merges Rule 1 rows
 //! per folder and spends each process's read budget for Rule 2.
 
-use thadam_core::{Action, Category, Flag, NewEvent};
+use thadam_core::{Action, Category, Flag, NewEvent, Outcome};
 
 use crate::registry::{Registry, under};
 use crate::source::{EventKind, OsEvent};
@@ -21,15 +21,20 @@ pub enum Rollup {
 }
 
 /// Flags that keep a row individual: these are the rows the audit exists for (ADR-005
-/// Decision 3). `secret_pattern` is checked by the pipeline, which holds the detectors.
+/// Decision 3, ADR-006 Decision 4). `secret_pattern` is checked by the pipeline, which holds
+/// the detectors. Refused opens (any outcome but `allowed`) stay individual too.
 const KEEP_FLAGS: &[Flag] = &[
     Flag::SensitivePath,
     Flag::OutsideProject,
     Flag::SecretPattern,
+    Flag::Unconfirmed,
 ];
 
 pub fn hint(event: &OsEvent, record: &NewEvent, registry: &Registry) -> Rollup {
-    if record.category != Category::File || record.flags.iter().any(|f| KEEP_FLAGS.contains(f)) {
+    if record.category != Category::File
+        || record.outcome != Outcome::Allowed
+        || record.flags.iter().any(|f| KEEP_FLAGS.contains(f))
+    {
         return Rollup::Never;
     }
     // What the agent binaries themselves touch is primary evidence.
@@ -106,7 +111,7 @@ pub fn group_folder(path: &str, project: Option<&str>) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use thadam_core::{Outcome, Source};
+    use thadam_core::Source;
     use time::macros::datetime;
 
     use crate::source::{Identity, ProcessRef};
@@ -169,6 +174,7 @@ mod tests {
         let kind = EventKind::Open {
             path: path.into(),
             readable: true,
+            writable: false,
             size: None,
         };
         (event("/usr/bin/git", kind), record(Action::Read, path, &[]))

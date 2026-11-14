@@ -309,6 +309,7 @@ mod tests {
             EventKind::Open {
                 path: "/tmp/x".into(),
                 readable: true,
+                writable: false,
                 size: None,
             },
         )

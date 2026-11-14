@@ -315,6 +315,7 @@ fn parse(line: &str) -> Result<OsEvent, Skip> {
             EventKind::Open {
                 path: file.path,
                 readable: fflag & 1 != 0,
+                writable: fflag & 2 != 0,
                 size,
             }
         }
@@ -412,6 +413,7 @@ mod tests {
             EventKind::Open {
                 path: "/Users/test/x".into(),
                 readable: true,
+                writable: false,
                 size: Some(1234)
             }
         );
@@ -584,6 +586,7 @@ mod tests {
             parsed.kind,
             EventKind::Open {
                 readable: false,
+                writable: false,
                 size: None,
                 ..
             }

@@ -49,6 +49,8 @@ pub enum EventKind {
         path: String,
         /// Opened with the read flag.
         readable: bool,
+        /// Opened with the write flag (ADR-006: a refused write open is recorded too).
+        writable: bool,
         size: Option<i64>,
     },
     Close {

@@ -95,6 +95,8 @@ wire_enum!(
         ToolInternal => "tool_internal",
         // Stands for many paths under one folder (ADR-005).
         RolledUp => "rolled_up",
+        // The attempt was seen but its result could not be confirmed (ADR-006).
+        Unconfirmed => "unconfirmed",
     }
 );
 

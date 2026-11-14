@@ -1,4 +1,5 @@
-//! Source item in, finished records out: tree, classify, collapse (ADR-003 Decisions 3, 6, 7).
+//! Source item in, finished records out: tree, classify, pairing, collapse (ADR-003
+//! Decisions 3, 6, 7; ADR-006).
 //!
 //! No I/O here; `run.rs` feeds items in and writes records out.
 
@@ -10,10 +11,11 @@ use time::Duration;
 
 use crate::classify::classify;
 use crate::collapse::Collapser;
+use crate::pairing::{Pairing, Released};
 use crate::registry::Registry;
 use crate::rollup::{self, Rollup};
 use crate::snapshot::Snapshot;
-use crate::source::{SkipReason, SourceItem};
+use crate::source::{EventKind, OsEvent, SkipReason, SourceItem};
 use crate::tree::ProcessTree;
 
 /// Counters for diagnostics. Counts only: never paths, arguments or values.
@@ -68,6 +70,8 @@ impl Default for Settings {
 pub struct Pipeline {
     registry: Registry,
     tree: ProcessTree,
+    /// Holds opens until their close or exit shows whether the OS allowed them.
+    pairing: Pairing,
     collapser: Collapser,
     /// Finds secrets in roll-up candidates' paths, which must stay individual (ADR-005).
     redactor: Redactor,
@@ -82,6 +86,7 @@ impl Pipeline {
         Ok(Self {
             registry,
             tree,
+            pairing: Pairing::default(),
             collapser,
             redactor: Redactor::with_default_detectors()?,
             stats: Stats::default(),
@@ -101,6 +106,7 @@ impl Pipeline {
         let event = match item {
             SourceItem::Event(e) => e,
             SourceItem::Gap { missed } => {
+                self.pairing.gap();
                 self.stats.gaps += 1;
                 self.stats.missed = self.stats.missed.saturating_add(missed);
                 return Vec::new();
@@ -113,25 +119,54 @@ impl Pipeline {
         self.stats.events += 1;
 
         let observation = self.tree.observe(&event, &self.registry);
-        let mut done = match observation
+        let pid = event.process.pid;
+        let mut released = match &event.kind {
+            EventKind::Close { path, .. } => {
+                self.pairing.close(pid, event.process.ppid, path, event.ts)
+            }
+            EventKind::Fork { child } => {
+                self.pairing.fork(pid, child.pid);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        released.extend(self.pairing.advance(event.ts));
+        let record = observation
             .actor
             .as_ref()
-            .and_then(|m| classify(&event, m, &self.registry))
-        {
-            Some(record) => {
-                let mut rollup = rollup::hint(&event, &record, &self.registry);
-                if rollup != Rollup::Never
-                    && self.redactor.scan(&record.target).get(DetectorKind::Secret) > 0
-                {
-                    rollup = Rollup::Never;
-                }
+            .and_then(|m| classify(&event, m, &self.registry));
+        let mut done = match (record, &event.kind) {
+            (
+                Some(record),
+                EventKind::Open {
+                    path,
+                    readable,
+                    writable,
+                    ..
+                },
+            ) => {
+                let rollup = self.rollup_hint(&event, &record);
+                released.extend(
+                    self.pairing
+                        .open(pid, path, record, rollup, *readable, *writable),
+                );
+                self.collapser.advance(event.ts)
+            }
+            (Some(record), _) => {
+                let rollup = self.rollup_hint(&event, &record);
                 self.collapser.push_with(record, rollup)
             }
-            None => self.collapser.advance(event.ts),
+            (None, _) => self.collapser.advance(event.ts),
         };
+        if matches!(event.kind, EventKind::Exit) {
+            released.extend(self.pairing.exit(pid, event.process.ppid));
+        }
+        self.push_released(released, &mut done);
         if observation.member.is_some() {
             self.stats.member_events += 1;
         }
+        // Hidden ordering: the exit's held opens are pushed above, before the session's
+        // windows are flushed here, so its refused opens are written with the session.
         if let Some(session) = observation.session_ended {
             done.extend(self.collapser.flush_session(&session));
         }
@@ -141,8 +176,28 @@ impl Pipeline {
 
     /// Closes every open window (shutdown or end of input).
     pub fn finish(&mut self) -> Vec<NewEvent> {
-        let done = self.collapser.flush_all();
+        let released = self.pairing.drain();
+        let mut done = Vec::new();
+        self.push_released(released, &mut done);
+        done.extend(self.collapser.flush_all());
         self.stats.records += done.len() as u64;
         done
+    }
+
+    /// Roll-up eligibility; a path containing a secret always stays its own row (ADR-005).
+    fn rollup_hint(&self, event: &OsEvent, record: &NewEvent) -> Rollup {
+        let rollup = rollup::hint(event, record, &self.registry);
+        if rollup != Rollup::Never
+            && self.redactor.scan(&record.target).get(DetectorKind::Secret) > 0
+        {
+            return Rollup::Never;
+        }
+        rollup
+    }
+
+    fn push_released(&mut self, released: Vec<Released>, done: &mut Vec<NewEvent>) {
+        for r in released {
+            done.extend(self.collapser.push_with(r.record, r.rollup));
+        }
     }
 }

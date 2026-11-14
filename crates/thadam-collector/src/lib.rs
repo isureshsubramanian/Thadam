@@ -3,6 +3,7 @@
 
 pub mod classify;
 pub mod collapse;
+pub mod pairing;
 pub mod pipeline;
 pub mod registry;
 pub mod rollup;

@@ -9,7 +9,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
-use thadam_core::{Action, Flag, NewEvent};
+use thadam_core::{Action, Flag, NewEvent, Outcome};
 use time::{Duration, OffsetDateTime};
 
 use crate::registry::DEFAULT_READ_BUDGET;
@@ -30,6 +30,8 @@ const BUDGET_PRUNE_AT: usize = 4_096;
 struct Key {
     session_id: Option<String>,
     action: Action,
+    /// Allowed and refused attempts on one path never merge (ADR-006 Decision 4).
+    outcome: Outcome,
     process_path: String,
     /// The path, or the folder for a roll-up row.
     target: String,
@@ -146,6 +148,7 @@ impl Collapser {
         let key = Key {
             session_id: event.session_id.clone(),
             action: event.action,
+            outcome: event.outcome,
             process_path: event.process_path.clone(),
             target: folder.unwrap_or_else(|| event.target.clone()),
             rollup,
@@ -279,7 +282,7 @@ mod tests {
     use super::*;
     use crate::rollup::Rollup;
     use std::collections::BTreeSet;
-    use thadam_core::{Category, Outcome, Source};
+    use thadam_core::{Category, Source};
     use time::macros::datetime;
 
     fn read(path: &str, secs: i64) -> NewEvent {
