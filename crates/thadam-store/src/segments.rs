@@ -11,8 +11,8 @@
 //! never rows, and records each removal in the catalog first, so `verify_dir` can tell a
 //! retired segment from a missing one.
 
-use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use thadam_core::{CatalogKind, CatalogRow, EventRecord, to_hex};
@@ -23,6 +23,9 @@ use crate::disk::DiskSpace;
 use crate::{ChainBreak, ChainStart, Store, StoreError, Tail};
 
 pub const CATALOG_FILE: &str = "catalog.db";
+/// Held exclusively by the one writer (ADR-010 Decision 4). Not a `.db` file, so
+/// `verify_dir` does not list it as unknown.
+pub const LOCK_FILE: &str = "writer.lock";
 const DAY_US: i64 = 86_400 * 1_000_000;
 const GB: u64 = 1_000_000_000;
 
@@ -107,6 +110,9 @@ pub struct SegmentWriter {
     pause: Option<Pause>,
     status: SegmentStatus,
     warnings: Vec<String>,
+    /// Holds the writer lock until the writer is dropped; the kernel releases it if the
+    /// process dies, so a crash never leaves a stale lock.
+    _lock: File,
 }
 
 impl SegmentWriter {
@@ -119,6 +125,8 @@ impl SegmentWriter {
     ) -> Result<Self, StoreError> {
         let dir = dir.as_ref().to_path_buf();
         DirBuilder::new().recursive(true).mode(0o755).create(&dir)?;
+        // Before anything is read or repaired: a second writer must not touch the store.
+        let lock = lock_writer(&dir)?;
         let catalog = Catalog::open(dir.join(CATALOG_FILE))?;
         let segments = segments_from(&catalog.entries()?)?;
         let mut warnings = Vec::new();
@@ -196,6 +204,7 @@ impl SegmentWriter {
             pause: None,
             status: SegmentStatus::default(),
             warnings,
+            _lock: lock,
         };
         writer.refresh_status();
         Ok(writer)
@@ -433,6 +442,21 @@ impl SegmentWriter {
         self.status.store_bytes = self.store_bytes();
         self.status.segments = self.closed.len() + usize::from(self.active.is_some());
         self.status.paused = self.pause.is_some();
+    }
+}
+
+/// Takes the store's writer lock without waiting.
+fn lock_writer(dir: &Path) -> Result<File, StoreError> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(dir.join(LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(StoreError::Locked),
+        Err(TryLockError::Error(e)) => Err(StoreError::Io(e)),
     }
 }
 

@@ -4,7 +4,10 @@
 //! exiting on its own, so a service manager restarts the collector), 2 usage or setup error.
 //! Diagnostics hold counts only, never paths, arguments or values.
 
+use std::fs::{self, DirBuilder};
 use std::io::BufReader;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,9 +15,11 @@ use std::time::Duration;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use thadam_collector::diag;
 use thadam_collector::pipeline::{Pipeline, Settings};
 use thadam_collector::registry::Registry;
 use thadam_collector::run::{Ended, run, spawn_logger};
+use thadam_collector::service;
 use thadam_collector::snapshot::{self, SystemProcessTable};
 use thadam_collector::source::eslogger::EsloggerSource;
 use thadam_collector::source::network::{DEFAULT_SOCKET, FlowListener};
@@ -23,8 +28,11 @@ use thadam_store::{SegmentWriter, SystemDisk};
 const USAGE: &str = "usage:
   thadam-collector run --registry <file> --store <folder> [--source eslogger|stdin] [--window-secs <n>]
                        [--flow-socket <path>|off]   (default: the system path with eslogger, off with stdin)
+                       [--log <file>]               (default: stderr; the file rotates at 1 MB, 5 kept)
   thadam-collector check-registry <file>
-  thadam-collector snapshot --registry <file>";
+  thadam-collector snapshot --registry <file>
+  thadam-collector install [--registry <file>] [--store <folder>]   (as root; the system paths by default)
+  thadam-collector uninstall                                        (as root; keeps the store, registry and logs)";
 
 /// Longest accepted window (estimate: an hour bounds memory and crash loss).
 const MAX_WINDOW_SECS: i64 = 3600;
@@ -36,16 +44,18 @@ fn main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("check-registry") => cmd_check(&args[1..]),
         Some("snapshot") => cmd_snapshot(&args[1..]),
+        Some("install") => cmd_install(&args[1..]),
+        Some("uninstall") if args.len() == 1 => cmd_uninstall(),
         _ => Err(Failure::Usage(USAGE.to_string())),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Usage(msg)) => {
-            eprintln!("{msg}");
+            diag!("{msg}");
             ExitCode::from(2)
         }
         Err(Failure::Runtime(msg)) => {
-            eprintln!("thadam-collector: {msg}");
+            diag!("thadam-collector: {msg}");
             ExitCode::from(1)
         }
     }
@@ -63,6 +73,7 @@ struct Options {
     source: Option<String>,
     window_secs: Option<String>,
     flow_socket: Option<String>,
+    log: Option<String>,
 }
 
 fn parse_options(args: &[String]) -> Result<Options, Failure> {
@@ -75,6 +86,7 @@ fn parse_options(args: &[String]) -> Result<Options, Failure> {
             "--source" => &mut o.source,
             "--window-secs" => &mut o.window_secs,
             "--flow-socket" => &mut o.flow_socket,
+            "--log" => &mut o.log,
             _ => return Err(Failure::Usage(USAGE.to_string())),
         };
         *slot = Some(
@@ -90,7 +102,7 @@ fn load_registry(path: Option<&str>) -> Result<Registry, Failure> {
     let path = path.ok_or_else(|| Failure::Usage(USAGE.to_string()))?;
     let registry = Registry::load(path).map_err(|e| Failure::Usage(e.to_string()))?;
     for tool in registry.tools().filter(|t| t.has_path_matcher()) {
-        eprintln!(
+        diag!(
             "warning: tool '{}' is matched by path, which is weaker than code-signing identity",
             tool.key
         );
@@ -153,8 +165,13 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         Box::new(SystemDisk),
     )
     .map_err(|e| Failure::Usage(e.to_string()))?;
+    // After the writer lock: a refused second collector never touches the log (diag.rs).
+    if let Some(log) = o.log.as_deref() {
+        diag::to_file(Path::new(log))
+            .map_err(|e| Failure::Usage(format!("cannot open the log: {e}")))?;
+    }
     for warning in store.warnings() {
-        eprintln!("thadam-collector: store warning: {warning}");
+        diag!("thadam-collector: store warning: {warning}");
     }
     let source = o.source.as_deref().unwrap_or("eslogger");
     let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
@@ -213,7 +230,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     }
     .map_err(|e| Failure::Runtime(e.to_string()))?;
 
-    eprintln!("thadam-collector: final {stats}");
+    diag!("thadam-collector: final {stats}");
     // A stop request that raced the logger's own exit is still a clean stop.
     let stopped = stop.load(Ordering::SeqCst);
     match (ended, source) {
@@ -222,6 +239,98 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Installs this binary as the launch daemon (ADR-010 Decision 5). Run with sudo; without
+/// root the first write fails.
+fn cmd_install(args: &[String]) -> Result<(), Failure> {
+    let o = parse_options(args)?;
+    if o.source.is_some() || o.window_secs.is_some() || o.flow_socket.is_some() || o.log.is_some() {
+        return Err(Failure::Usage(USAGE.to_string()));
+    }
+    let registry = o.registry.as_deref().unwrap_or(service::DEFAULT_REGISTRY);
+    let store = o.store.as_deref().unwrap_or(service::DEFAULT_STORE);
+    load_registry(Some(registry))?;
+    let root = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => Failure::Usage("run install with sudo".into()),
+        _ => Failure::Runtime(e.to_string()),
+    };
+    let bin_dir = Path::new(service::BIN_DIR);
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(bin_dir)
+        .map_err(root)?;
+    if let Some(folder) = service::unsafe_folder(bin_dir, 0).map_err(root)? {
+        return Err(Failure::Usage(format!(
+            "not installed: {folder} must be owned by root and writable only by root"
+        )));
+    }
+    let me = std::env::current_exe().map_err(root)?;
+    if me != Path::new(service::BIN) {
+        let tmp = bin_dir.join("thadam-collector.tmp");
+        fs::copy(&me, &tmp).map_err(root)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(root)?;
+        fs::rename(&tmp, service::BIN).map_err(root)?;
+    }
+    if let Some(dir) = Path::new(service::LOG).parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(dir)
+            .map_err(root)?;
+    }
+    let tmp = format!("{}.tmp", service::PLIST);
+    fs::write(
+        &tmp,
+        service::plist(service::BIN, registry, store, service::LOG),
+    )
+    .map_err(root)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).map_err(root)?;
+    fs::rename(&tmp, service::PLIST).map_err(root)?;
+
+    // A reinstall replaces the running job; "not loaded" is not an error here.
+    launchctl(&["bootout", &format!("system/{}", service::LABEL)]);
+    if !launchctl(&["bootstrap", "system", service::PLIST]) {
+        return Err(Failure::Runtime("launchctl did not load the job".into()));
+    }
+    println!("Installed: the collector runs from boot and restarts if it stops.");
+    println!(
+        "First install: allow Full Disk Access for {} in System Settings,",
+        service::BIN
+    );
+    println!(
+        "then: sudo launchctl kickstart -k system/{}",
+        service::LABEL
+    );
+    Ok(())
+}
+
+fn cmd_uninstall() -> Result<(), Failure> {
+    launchctl(&["bootout", &format!("system/{}", service::LABEL)]);
+    for path in [service::PLIST, service::BIN] {
+        match fs::remove_file(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(Failure::Usage("run uninstall with sudo".into()));
+            }
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(Failure::Runtime(e.to_string()));
+            }
+            _ => {}
+        }
+    }
+    println!("Removed the collector daemon. The store, registry and logs are kept.");
+    Ok(())
+}
+
+/// Runs launchctl; true when it succeeded. Its own messages are not passed on.
+fn launchctl(args: &[&str]) -> bool {
+    std::process::Command::new("/bin/launchctl")
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// The network source's socket. A path given explicitly must work; the default is best
@@ -235,7 +344,7 @@ fn open_flow_socket(arg: Option<&str>, source: &str) -> Result<Option<FlowListen
         (None, _) => match FlowListener::bind(DEFAULT_SOCKET) {
             Ok(l) => Ok(Some(l)),
             Err(e) => {
-                eprintln!("thadam-collector: network flows not recorded, cannot listen: {e}");
+                diag!("thadam-collector: network flows not recorded, cannot listen: {e}");
                 Ok(None)
             }
         },
@@ -245,7 +354,7 @@ fn open_flow_socket(arg: Option<&str>, source: &str) -> Result<Option<FlowListen
 fn seed_from_snapshot(pipeline: &mut Pipeline) {
     match snapshot::take(&SystemProcessTable, pipeline.registry()) {
         Ok(snap) => {
-            eprintln!(
+            diag!(
                 "thadam-collector: snapshot found {} session roots, {} member processes",
                 snap.roots.len(),
                 snap.members.len()
@@ -253,6 +362,6 @@ fn seed_from_snapshot(pipeline: &mut Pipeline) {
             pipeline.seed(&snap);
         }
         // Not fatal: processes started from now on are still attributed.
-        Err(e) => eprintln!("thadam-collector: snapshot failed, continuing without it: {e}"),
+        Err(e) => diag!("thadam-collector: snapshot failed, continuing without it: {e}"),
     }
 }

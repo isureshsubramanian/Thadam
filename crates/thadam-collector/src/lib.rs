@@ -3,12 +3,14 @@
 
 pub mod classify;
 pub mod collapse;
+pub mod diag;
 pub mod netflow;
 pub mod pairing;
 pub mod pipeline;
 pub mod registry;
 pub mod rollup;
 pub mod run;
+pub mod service;
 pub mod snapshot;
 pub mod source;
 pub mod tree;

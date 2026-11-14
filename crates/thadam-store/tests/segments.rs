@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::Connection;
 use thadam_core::{Action, Category, EventRecord, NewEvent, Outcome, Redactor, Source};
 use thadam_store::{
-    CATALOG_FILE, DirBreak, DiskSpace, Limits, SegmentWriter, Store, Written, migrate, verify_dir,
+    CATALOG_FILE, DirBreak, DiskSpace, Limits, SegmentWriter, Store, StoreError, Written, migrate,
+    verify_dir,
 };
 use time::OffsetDateTime;
 use time::macros::datetime;
@@ -168,6 +169,29 @@ fn reopening_continues_the_active_segment_and_the_chain() {
     let report = verify_dir(tmp.store()).unwrap();
     assert_eq!(report.broken, None);
     assert_eq!(report.verified_rows, 6);
+}
+
+#[test]
+fn a_second_writer_is_refused_until_the_first_is_dropped() {
+    let tmp = TempDir::new("lock");
+    let t = datetime!(2026-11-12 10:00 UTC);
+    let mut first = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut first, &[t], 2);
+    let second = SegmentWriter::open(tmp.store(), Limits::default(), plenty());
+    assert!(matches!(second, Err(StoreError::Locked)));
+    // The refused writer changed nothing: the first keeps writing one chain.
+    write(&mut first, &[t], 2);
+    drop(first);
+    let mut again = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+    write(&mut again, &[t], 2);
+    drop(again);
+    let report = verify_dir(tmp.store()).unwrap();
+    assert_eq!(report.broken, None);
+    assert_eq!(report.verified_rows, 6);
+    assert!(
+        report.unknown_files.is_empty(),
+        "the lock file is not reported"
+    );
 }
 
 #[test]

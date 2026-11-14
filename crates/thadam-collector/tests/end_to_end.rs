@@ -1030,3 +1030,69 @@ fn network_flows_are_attributed_to_sessions() {
         assert!(!stderr.contains(leak), "{stderr}");
     }
 }
+
+/// ADR-010 Decision 4: while one collector holds the store, a second is refused before it
+/// binds the network socket or opens the log, so it can take neither from the first.
+#[test]
+fn a_second_collector_is_refused_and_touches_neither_socket_nor_log() {
+    let tmp = TempDir::new("second");
+    let store = tmp.path("store");
+    let held = thadam_store::SegmentWriter::open(
+        &store,
+        thadam_store::Limits::default(),
+        Box::new(thadam_store::SystemDisk),
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .arg("run")
+        .arg("--registry")
+        .arg(tmp.path("registry.json"))
+        .arg("--store")
+        .arg(&store)
+        .args(["--source", "stdin", "--flow-socket"])
+        .arg(tmp.path("flow.sock"))
+        .arg("--log")
+        .arg(tmp.path("collector.log"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("another collector is writing this store")
+    );
+    assert!(!tmp.path("flow.sock").exists());
+    assert!(!tmp.path("collector.log").exists());
+    drop(held);
+}
+
+/// `--log` sends the diagnostics to the file, with a UTC time on each line.
+#[test]
+fn diagnostics_go_to_the_log_file_when_given() {
+    let tmp = TempDir::new("log");
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg("--registry")
+        .arg(tmp.path("registry.json"))
+        .arg("--store")
+        .arg(tmp.path("store"))
+        .args(["--source", "stdin", "--log"])
+        .arg(tmp.path("collector.log"))
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "nothing on stderr once the log is open"
+    );
+    let log = std::fs::read_to_string(tmp.path("collector.log")).unwrap();
+    let last = log.lines().last().unwrap();
+    assert!(last.contains(" thadam-collector: final events=0"), "{last}");
+    assert!(
+        last.as_bytes().get(19) == Some(&b'Z'),
+        "UTC stamp first: {last}"
+    );
+}

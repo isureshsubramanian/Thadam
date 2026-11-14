@@ -12,7 +12,7 @@
 //! low disk (ADR-009 Decision 4): the writer then counts records instead of writing them,
 //! and the catalog records the gap with its count.
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -88,8 +88,17 @@ pub fn spawn_logger() -> std::io::Result<(Child, BufReader<ChildStdout>)> {
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()?;
+    // The logger's own errors (for example a missing Full Disk Access grant) go to the same
+    // place as the collector's diagnostics, so the daemon's log shows why it stopped.
+    if let Some(err) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                crate::diag!("eslogger: {line}");
+            }
+        });
+    }
     let stdout = child
         .stdout
         .take()
@@ -207,7 +216,7 @@ fn write_all(
                 let after = store.status();
                 if after != before {
                     if after.paused && !before.paused {
-                        eprintln!("thadam-collector: disk low, writing paused");
+                        crate::diag!("thadam-collector: disk low, writing paused");
                     }
                     publish(&store);
                 }
@@ -220,7 +229,7 @@ fn write_all(
             store.maintain(now_us())?;
             if store.status().paused && !was_paused {
                 // One line, counts only (ADR-009 Decision 4).
-                eprintln!("thadam-collector: disk low, writing paused");
+                crate::diag!("thadam-collector: disk low, writing paused");
             }
             publish(&store);
             last_maintain = Instant::now();
@@ -268,7 +277,7 @@ fn process(
         if last_report.elapsed() >= progress.every {
             pipeline.stats.written = progress.written.load(Ordering::Relaxed);
             pipeline.stats.store = progress.status.lock().ok().map(|s| *s);
-            eprintln!("thadam-collector: {}", pipeline.stats);
+            crate::diag!("thadam-collector: {}", pipeline.stats);
             last_report = Instant::now();
         }
         match items.recv_timeout(POLL) {

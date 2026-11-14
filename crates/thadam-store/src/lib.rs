@@ -39,6 +39,9 @@ pub enum StoreError {
     /// a segment name and sequence numbers only.
     #[error("store layout: {0}")]
     Layout(String),
+    /// Another process holds the store's writer lock (ADR-010 Decision 4).
+    #[error("another collector is writing this store")]
+    Locked,
 }
 
 /// Where a chain (or a segment of it) starts: the first row's seq and its `prev_hash`.

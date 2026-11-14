@@ -19,6 +19,7 @@
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
+!/scripts/install-collector.sh
 !/scripts/migrate-store.sh
 !/scripts/notices.mjs
 !/scripts/notices.sh
