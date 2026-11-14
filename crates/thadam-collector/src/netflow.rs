@@ -420,8 +420,9 @@ fn new_flow(
     registry: &Registry,
 ) -> Option<Flow> {
     let tool = registry.tool(attribution.member.tool)?;
-    let category = category(open.remote_ip, open.remote_port, open.host.as_deref());
-    let unknown_host = match open.host.as_deref() {
+    let host = row_host(open);
+    let category = category(open.remote_ip, open.remote_port, host);
+    let unknown_host = match host {
         Some(host) => !tool.network.is_known_host(host),
         // An address alone says nothing about who is behind it, unless it is local.
         None => !is_internal(open.remote_ip),
@@ -436,11 +437,7 @@ fn new_flow(
         session: Arc::clone(&attribution.member.session_id),
         process_path,
         proto: open.proto,
-        target: Arc::from(target(
-            open.remote_ip,
-            open.remote_port,
-            open.host.as_deref(),
-        )),
+        target: Arc::from(target(open.remote_ip, open.remote_port, host)),
         continued: false,
     };
     Some(Flow {
@@ -474,6 +471,19 @@ pub fn target(ip: IpAddr, port: u16, host: Option<&str>) -> String {
 }
 
 /// ADR-007 Decision 5: file-sharing ports first, then local addresses and `.local` names.
+/// The DNS port. A lookup flow is tagged with the name being looked up, not the server's.
+const DNS_PORT: u16 = 53;
+
+/// The host name a row may show. For DNS lookups the system reports the name looked up, so
+/// the row shows the DNS server's address instead (ADR-007 amendment 3).
+fn row_host(open: &FlowOpen) -> Option<&str> {
+    if open.remote_port == DNS_PORT {
+        None
+    } else {
+        open.host.as_deref()
+    }
+}
+
 pub fn category(ip: IpAddr, port: u16, host: Option<&str>) -> Category {
     if VOLUME_PORTS.contains(&port) {
         Category::NetworkVolume
@@ -765,6 +775,57 @@ mod tests {
             "{got:?}"
         );
         assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn dns_lookups_show_the_server_not_the_name_looked_up() {
+        let mut run = Run::new();
+        run.at(
+            0,
+            1,
+            open(
+                300,
+                "192.168.1.1",
+                53,
+                Some("api.example-agent.test"),
+                Proto::Udp,
+            ),
+        );
+        run.at(
+            0,
+            2,
+            open(
+                300,
+                "203.0.113.53",
+                53,
+                Some("api.example-agent.test"),
+                Proto::Udp,
+            ),
+        );
+        let mut rows: Vec<(String, Category, bool)> = run
+            .finish()
+            .into_iter()
+            .map(|r| {
+                let unknown = r.flags.contains(&Flag::UnknownHost);
+                (r.target, r.category, unknown)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            rows,
+            [
+                (
+                    "192.168.1.1:53".to_string(),
+                    Category::NetworkInternal,
+                    false
+                ),
+                (
+                    "203.0.113.53:53".to_string(),
+                    Category::NetworkExternal,
+                    true
+                ),
+            ]
+        );
     }
 
     #[test]
