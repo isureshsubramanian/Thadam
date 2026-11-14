@@ -9,7 +9,8 @@
 
 use std::io::BufReader;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -96,7 +97,12 @@ where
     std::thread::spawn(move || read_all(source, &item_tx));
 
     let (record_tx, record_rx) = sync_channel::<EventRecord>(RECORD_BUFFER);
-    let writer = std::thread::spawn(move || write_all(store, &record_rx));
+    // Shared so progress lines show rows written so far, not only the total at the end.
+    let written = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let written = Arc::clone(&written);
+        std::thread::spawn(move || write_all(store, &record_rx, &written))
+    };
 
     prepare(pipeline);
 
@@ -107,11 +113,14 @@ where
         &record_tx,
         stop,
         on_stop,
-        report_every,
+        Progress {
+            every: report_every,
+            written: &written,
+        },
     );
     drop(record_tx);
-    let written = writer.join().map_err(|_| RunError::Writer)?;
-    pipeline.stats.written = written?;
+    writer.join().map_err(|_| RunError::Writer)??;
+    pipeline.stats.written = written.load(Ordering::Relaxed);
     let ended = outcome?;
     Ok((ended, pipeline.stats.clone()))
 }
@@ -130,13 +139,22 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Result<SourceItem, St
     }
 }
 
-fn write_all(mut store: Store, rx: &Receiver<EventRecord>) -> Result<u64, StoreError> {
-    let mut written = 0u64;
+fn write_all(
+    mut store: Store,
+    rx: &Receiver<EventRecord>,
+    written: &AtomicU64,
+) -> Result<(), StoreError> {
     for record in rx {
         store.append(&record)?;
-        written += 1;
+        written.fetch_add(1, Ordering::Relaxed);
     }
-    Ok(written)
+    Ok(())
+}
+
+/// When to print a progress line, and the writer's running count for it.
+struct Progress<'a> {
+    every: Duration,
+    written: &'a AtomicU64,
 }
 
 fn process(
@@ -146,7 +164,7 @@ fn process(
     records: &SyncSender<EventRecord>,
     stop: &AtomicBool,
     on_stop: impl FnOnce(),
-    report_every: Duration,
+    progress: Progress<'_>,
 ) -> Result<Ended, RunError> {
     let mut on_stop = Some(on_stop);
     let mut stop_seen: Option<Instant> = None;
@@ -162,7 +180,8 @@ fn process(
         if stop_seen.is_some_and(|t| t.elapsed() >= STOP_GRACE) {
             break Ended::Stopped;
         }
-        if last_report.elapsed() >= report_every {
+        if last_report.elapsed() >= progress.every {
+            pipeline.stats.written = progress.written.load(Ordering::Relaxed);
             eprintln!("thadam-collector: {}", pipeline.stats);
             last_report = Instant::now();
         }
