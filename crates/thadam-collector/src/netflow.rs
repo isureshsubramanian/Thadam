@@ -426,8 +426,11 @@ fn new_flow(
         // An address alone says nothing about who is behind it, unless it is local.
         None => !is_internal(open.remote_ip),
     };
+    // The tree's executable, else the one the extension read, else a placeholder
+    // (ADR-007 amendment 2).
     let process_path = attribution
         .executable
+        .or_else(|| open.exe.as_deref().map(Arc::from))
         .unwrap_or_else(|| Arc::from(UNKNOWN_PROCESS));
     let key = GroupKey {
         session: Arc::clone(&attribution.member.session_id),
@@ -557,6 +560,7 @@ mod tests {
             } else {
                 HostFrom::None
             },
+            exe: None,
         })
     }
 
@@ -864,6 +868,31 @@ mod tests {
         let rows = run.finish();
         assert_eq!(rows[0].process_path, UNKNOWN_PROCESS);
         assert_eq!(rows[0].pid, 301);
+    }
+
+    #[test]
+    fn the_extensions_exe_is_used_only_when_the_tree_has_none() {
+        let with_exe = |pid| match api(pid) {
+            FlowEvent::Open(o) => FlowEvent::Open(FlowOpen {
+                exe: Some("/Users/test/.local/bin/helper".to_string()),
+                ..o
+            }),
+            other => other,
+        };
+        let mut run = Run::new();
+        // 301 is unknown to the tree: the extension's path is used.
+        run.at(0, 1, with_exe(301));
+        // 300 is known to the tree: the tree's path wins.
+        run.at(0, 2, with_exe(300));
+        let mut paths: Vec<String> = run.finish().into_iter().map(|r| r.process_path).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "/Users/test/.local/bin/agent",
+                "/Users/test/.local/bin/helper"
+            ]
+        );
     }
 
     #[test]

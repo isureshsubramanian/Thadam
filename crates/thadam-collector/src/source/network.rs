@@ -15,14 +15,16 @@ use std::path::{Path, PathBuf};
 
 use garde::Validate;
 use serde::Deserialize;
+use thadam_core::model::MAX_PATH;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-/// Where the collector listens. Its folder is root-only (ADR-007 Decision 1).
+/// Where the collector listens. Its folder is root-only (ADR-007 Decision 1). The extension
+/// connects to the same path (`defaultFlowSocket` in `macos/ThadamNetKit`); change both.
 pub const DEFAULT_SOCKET: &str = "/var/run/thadam/flow.sock";
-/// Longest accepted line. An estimate: a record with a 253-byte host and 16 ancestors is
-/// under 1 KB.
+/// Longest accepted line. Derivation: an open record with a 253-byte host, 16 ancestors and
+/// a 4,096-byte `exe` is under 5 KB; the rest is headroom.
 pub const MAX_LINE: usize = 8 * 1024;
 /// Longest host name (RFC 1035, as text).
 pub const MAX_HOST: usize = 253;
@@ -73,6 +75,9 @@ pub struct FlowOpen {
     /// Lower case, no trailing dot. `None` when `host_from` is `None`.
     pub host: Option<String>,
     pub host_from: HostFrom,
+    /// The process's executable as the extension read it (ADR-007 amendment 2). The tree's
+    /// executable wins when the tree knows the process.
+    pub exe: Option<String>,
 }
 
 /// What happened to a flow.
@@ -192,12 +197,22 @@ struct Wire {
     host: Option<String>,
     #[garde(skip)]
     host_from: Option<WireHostFrom>,
+    #[garde(inner(length(min = 1, max = MAX_PATH), custom(absolute_path)))]
+    exe: Option<String>,
     #[garde(skip)]
     bytes_out: Option<u64>,
     #[garde(skip)]
     bytes_in: Option<u64>,
     #[garde(skip)]
     missed: Option<u64>,
+}
+
+fn absolute_path(value: &str, _ctx: &()) -> garde::Result {
+    if value.starts_with('/') && !value.contains('\0') {
+        Ok(())
+    } else {
+        Err(garde::Error::new("not an absolute path"))
+    }
 }
 
 fn host_name(value: &str, _ctx: &()) -> garde::Result {
@@ -209,7 +224,9 @@ fn host_name(value: &str, _ctx: &()) -> garde::Result {
 }
 
 /// True for a DNS name: dot-separated labels of 1 to 63 ASCII letters, digits, `-` or `_`,
-/// optionally ending in a dot.
+/// optionally ending in a dot. The extension applies the same rule before sending a name
+/// (`normalizedHost` in `macos/ThadamNetKit`), so a name it sends is never a rejected record;
+/// change both.
 pub fn is_host_name(value: &str) -> bool {
     let name = value.strip_suffix('.').unwrap_or(value);
     !name.is_empty()
@@ -247,7 +264,8 @@ impl Wire {
             || self.remote_ip.is_some()
             || self.remote_port.is_some()
             || self.host.is_some()
-            || self.host_from.is_some();
+            || self.host_from.is_some()
+            || self.exe.is_some();
         let byte_fields = self.bytes_out.is_some() || self.bytes_in.is_some();
         if let WireKind::Gap = self.kind {
             if open_fields || byte_fields || self.flow.is_some() {
@@ -296,6 +314,7 @@ impl Wire {
                     remote_port: self.remote_port?,
                     host,
                     host_from,
+                    exe: self.exe,
                 })
             }
             WireKind::Stats | WireKind::Close => {
@@ -475,6 +494,19 @@ mod tests {
         let item = parse_line(&open(r#","host_from":"none""#));
         assert!(matches!(item, FlowItem::Flow { .. }), "{item:?}");
 
+        // `exe` is optional (ADR-007 amendment 2): absent above, present here.
+        let item = parse_line(&open(
+            r#","host_from":"none","exe":"/Users/test/.local/bin/agent""#,
+        ));
+        let FlowItem::Flow {
+            event: FlowEvent::Open(o),
+            ..
+        } = item
+        else {
+            panic!("not an open: {item:?}");
+        };
+        assert_eq!(o.exe.as_deref(), Some("/Users/test/.local/bin/agent"));
+
         let stats = format!(
             r#"{{"v":1,"kind":"stats","flow":"{FLOW}","ts":"2026-11-14T09:33:10Z","bytes_out":10,"bytes_in":2000}}"#
         );
@@ -552,6 +584,27 @@ mod tests {
                 open(r#","host_from":"none""#).replace("2026-11-14T09:33:00.5Z", "yesterday"),
                 RejectReason::Invalid,
             ),
+            (
+                open(r#","host_from":"none","exe":"agent""#),
+                RejectReason::Invalid,
+            ),
+            (
+                open(r#","host_from":"none","exe":"""#),
+                RejectReason::Invalid,
+            ),
+            (
+                open(&format!(
+                    r#","host_from":"none","exe":"/{}""#,
+                    "a".repeat(MAX_PATH)
+                )),
+                RejectReason::Invalid,
+            ),
+            (
+                format!(
+                    r#"{{"v":1,"kind":"stats","flow":"{FLOW}","ts":"2026-11-14T09:33:10Z","exe":"/bin/x"}}"#
+                ),
+                RejectReason::Invalid,
+            ),
             ("not json".to_string(), RejectReason::Malformed),
             (
                 r#"{"v":1,"kind":"gap","ts":"2026-11-14T09:33:10Z"}"#.to_string(),
@@ -564,6 +617,35 @@ mod tests {
         let many = (0..17).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
         let line = open(r#","host_from":"none""#).replace("[4100,1]", &format!("[{many}]"));
         assert_eq!(parse_line(&line), FlowItem::Rejected(RejectReason::Invalid));
+    }
+
+    /// The exact lines the extension writes, as pinned in
+    /// `macos/ThadamNetKit/Tests/ThadamNetKitTests/FlowRecordTests.swift`. Change both together.
+    #[test]
+    fn lines_the_extension_writes_parse() {
+        let lines = [
+            r#"{"v":1,"kind":"open","flow":"0192f3a4-0000-7000-8000-000000000001","ts":"2026-11-14T09:33:00.500Z","pid":4211,"pidversion":3,"ppids":[4100,1],"proto":"tcp","direction":"out","remote_ip":"203.0.113.7","remote_port":443,"host":"api.example.test","host_from":"sni","exe":"/Users/test/.local/bin/agent"}"#,
+            r#"{"v":1,"kind":"open","flow":"0192f3a4-0000-7000-8000-000000000001","ts":"2026-11-14T09:33:00.500Z","pid":9,"pidversion":1,"ppids":[],"proto":"udp","direction":"in","remote_ip":"2001:db8::1","remote_port":53,"host_from":"none"}"#,
+            r#"{"v":1,"kind":"stats","flow":"0192f3a4-0000-7000-8000-000000000001","ts":"2026-11-14T09:33:00.500Z","bytes_out":10,"bytes_in":2000}"#,
+            r#"{"v":1,"kind":"close","flow":"0192f3a4-0000-7000-8000-000000000001","ts":"2026-11-14T09:33:00.500Z","bytes_out":0,"bytes_in":0}"#,
+            r#"{"v":1,"kind":"gap","ts":"2026-11-14T09:33:00.500Z","missed":42}"#,
+        ];
+        for line in lines {
+            let item = parse_line(line);
+            assert!(
+                matches!(item, FlowItem::Flow { .. } | FlowItem::Gap { .. }),
+                "{line}: {item:?}"
+            );
+        }
+        let FlowItem::Flow {
+            event: FlowEvent::Open(o),
+            ..
+        } = parse_line(lines[0])
+        else {
+            panic!("not an open");
+        };
+        assert_eq!(o.host_from, HostFrom::Sni);
+        assert_eq!(o.exe.as_deref(), Some("/Users/test/.local/bin/agent"));
     }
 
     #[test]

@@ -13,9 +13,11 @@
 !/about.hbs
 !/THIRD-PARTY-NOTICES.txt
 !/crates/
+!/macos/
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
+!/scripts/swift-unwrap-check.pl
 
 # Never commit data or build output, even inside allowed folders.
 target/
@@ -25,3 +27,9 @@ target/
 *.db-journal
 *.jsonl
 .DS_Store
+
+# Swift and Xcode local state; the signing team stays local.
+.build/
+.swiftpm/
+xcuserdata/
+/macos/Config/Local.xcconfig

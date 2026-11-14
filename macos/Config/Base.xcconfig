@@ -1,0 +1,21 @@
+// Settings for both targets (ADR-007 Decision 7). The signing team is not committed: put
+// `DEVELOPMENT_TEAM = <your team id>` in Config/Local.xcconfig (git-ignored).
+
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SDKROOT = macosx
+MARKETING_VERSION = 0.1
+CURRENT_PROJECT_VERSION = 1
+
+// Swift 6 with strict concurrency; every warning is an error.
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+GCC_TREAT_WARNINGS_AS_ERRORS = YES
+
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development
+ENABLE_HARDENED_RUNTIME = YES
+GENERATE_INFOPLIST_FILE = NO
+ALWAYS_SEARCH_USER_PATHS = NO
+
+#include? "Local.xcconfig"
