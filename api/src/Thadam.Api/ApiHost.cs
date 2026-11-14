@@ -8,6 +8,7 @@ using Thadam.Api.Endpoints;
 using Thadam.Api.Security;
 using Thadam.Audit;
 using Thadam.Store;
+using Thadam.Store.Queries;
 
 namespace Thadam.Api;
 
@@ -55,7 +56,12 @@ public static class ApiHost
         builder.Services.AddSingleton(time);
         var audit = await AuditLog.OpenAsync(options.AuditPath, Environment.UserName, time, ct).ConfigureAwait(false);
         builder.Services.AddSingleton(audit);
-        builder.Services.AddSingleton(new StoreFolder(options.StorePath));
+        var store = new StoreFolder(options.StorePath);
+        builder.Services.AddSingleton(store);
+        var index = new SegmentIndex(store);
+        builder.Services.AddSingleton(index);
+        builder.Services.AddSingleton(new StoreQueries(index));
+        builder.Services.AddSingleton<ToolRegistry>();
         builder.Services.AddSingleton<ChainMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ChainMonitor>());
 
@@ -128,6 +134,7 @@ public static class ApiHost
         var api = app.MapGroup("/api/v1");
         SessionEndpoints.Map(api);
         MetaEndpoints.Map(api);
+        QueryEndpoints.Map(api);
         app.Lifetime.ApplicationStopped.Register(() => audit.DisposeAsync().AsTask().GetAwaiter().GetResult());
         return app;
     }

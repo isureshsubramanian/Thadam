@@ -45,6 +45,8 @@ pub const DEFAULT_LARGE_UPLOAD: i64 = 10 * 1024 * 1024;
 pub const DEFAULT_LARGE_UPLOAD_SESSION: i64 = 50 * 1024 * 1024;
 /// Largest accepted upload threshold (1 TiB; above this the flag can't fire in practice).
 const MAX_UPLOAD_THRESHOLD: i64 = 1 << 40;
+/// Longest accepted display name, in characters (ADR-008 Decision 10).
+const MAX_DISPLAY_NAME: usize = 64;
 /// Most host patterns per tool (estimate; real lists are a handful).
 const MAX_KNOWN_HOSTS: usize = 1_000;
 /// Retention bounds (ADR-009 Decision 3): ages 7 to 3,650 days, sizes 1 GB to 1 TB, free
@@ -474,6 +476,11 @@ fn default_min_free_gb() -> u64 {
 struct ToolEntry {
     #[garde(length(min = 1, max = MAX_TOOL_KEY), custom(tool_key))]
     key: String,
+    /// The dashboard's name for the tool (ADR-008 Decision 10). Read by the API only; the
+    /// collector validates it and otherwise ignores it.
+    #[serde(default)]
+    #[garde(inner(length(chars, min = 1, max = MAX_DISPLAY_NAME), custom(printable)))]
+    display_name: Option<String>,
     #[serde(rename = "match")]
     #[garde(length(min = 1), dive)]
     matchers: Vec<MatcherEntry>,
@@ -718,6 +725,26 @@ mod tests {
 
     fn key(r: &Registry, id: Option<ToolId>) -> Option<&str> {
         id.and_then(|i| r.tool(i)).map(|t| t.key.as_str())
+    }
+
+    #[test]
+    fn display_names_are_optional_and_validated() {
+        let named = SAMPLE.replacen(
+            r#"{ "key": "cli_agent","#,
+            r#"{ "key": "cli_agent", "display_name": "CLI agent","#,
+            1,
+        );
+        assert!(Registry::parse(&named).is_ok());
+        let too_long = format!("\"{}\"", "x".repeat(65));
+        for bad in ["\"\"", too_long.as_str(), "\"tab\\there\""] {
+            let json = SAMPLE.replacen(
+                r#"{ "key": "cli_agent","#,
+                &format!(r#"{{ "key": "cli_agent", "display_name": {bad},"#),
+                1,
+            );
+            let err = Registry::parse(&json).unwrap_err().to_string();
+            assert!(err.contains("display_name"), "{err}");
+        }
     }
 
     #[test]

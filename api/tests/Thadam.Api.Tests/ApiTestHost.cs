@@ -18,6 +18,14 @@ public sealed class ApiTestHost : IAsyncDisposable
 {
     public const string Password = "correct horse battery staple";
 
+    /// <summary>Synthetic registry: one tool with a display name, one without.</summary>
+    public const string Registry = """
+        {"version": 1, "tools": [
+          {"key": "cli_agent", "display_name": "CLI agent", "match": [{"path": "/opt/example/cli-agent"}]},
+          {"key": "desktop_assistant", "match": [{"path": "/opt/example/assistant"}]}
+        ]}
+        """;
+
     private readonly WebApplication _app;
 
     private ApiTestHost(WebApplication app, ApiOptions options, Uri baseAddress)
@@ -45,6 +53,7 @@ public sealed class ApiTestHost : IAsyncDisposable
         var dataDir = Path.Combine(Path.GetTempPath(), $"thadam-api-test-{Guid.NewGuid():N}");
         var options = new ApiOptions(store.Folder, Path.Combine(dataDir, "registry.json"), dataDir, 0);
         await Credentials.SaveAsync(options.CredentialsPath, Credentials.Create(Password), ct);
+        await File.WriteAllTextAsync(options.RegistryPath, Registry, ct);
         var app = await ApiHost.BuildAsync(options, TimeProvider.System, ct);
         await app.StartAsync(ct);
         var url = new Uri(app.Urls.First());
@@ -82,6 +91,14 @@ public sealed class ApiTestHost : IAsyncDisposable
         await _app.StopAsync();
         await _app.DisposeAsync();
         Directory.Delete(Options.DataDir, recursive: true);
+    }
+
+    /// <summary>A signed-in client and its antiforgery token.</summary>
+    public async Task<(HttpClient Client, string Csrf)> SignedInAsync(CancellationToken ct)
+    {
+        var client = NewClient();
+        (await SignInAsync(client, Password, ct)).EnsureSuccessStatusCode();
+        return (client, await CsrfAsync(client, ct));
     }
 
     public sealed record TokenResponse(string Token);

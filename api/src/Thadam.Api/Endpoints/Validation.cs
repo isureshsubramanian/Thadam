@@ -30,6 +30,17 @@ public static class Validation
         });
     }
 
+    /// <summary>
+    /// Runs a validator built for this request (one that needs the registry's tools, say).
+    /// Returns the 400 result, or null when the argument is valid.
+    /// </summary>
+    public static async Task<IResult?> CheckAsync<T>(IValidator<T> validator, T arg, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(validator);
+        var result = await validator.ValidateAsync(arg, ct).ConfigureAwait(false);
+        return result.IsValid ? null : Invalid(result.Errors.Select(e => JsonName(e.PropertyName)));
+    }
+
     /// <summary>Writes need the antiforgery token as well as the cookie (ADR-008 Decision 2).</summary>
     public static RouteHandlerBuilder RequireCsrf(this RouteHandlerBuilder b) =>
         b.AddEndpointFilter(async (ctx, next) =>
