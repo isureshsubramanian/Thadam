@@ -164,6 +164,10 @@ impl ProcessTree {
         if let Some(entry) = self.members.get_mut(&process.pid) {
             match entry.pidversion {
                 Some(v) if v == process.pidversion => return Some(entry.membership.clone()),
+                // Versions only grow. An older one is a late event from the image before an
+                // exec (the OS closes close-on-exec files then), not a reused pid: it must not
+                // evict the new image's membership (capture 3, 14 Nov 2026).
+                Some(v) if process.pidversion < v => return None,
                 None => {
                     entry.pidversion = Some(process.pidversion);
                     return Some(entry.membership.clone());
@@ -440,6 +444,43 @@ mod tests {
         let mut reused = proc(301, 1, "/bin/x");
         reused.pidversion = 9;
         assert!(t.observe(&open(reused), &r).member.is_none());
+    }
+
+    #[test]
+    fn late_event_from_before_an_exec_keeps_the_new_session() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        // A shell child (version 5) execs the agent (version 6).
+        let mut exec = exec_agent(300, 200, "/Users/test/p");
+        exec.process.pidversion = 5;
+        if let EventKind::Exec { target, .. } = &mut exec.kind {
+            target.pidversion = 6;
+        }
+        let session = t.observe(&exec, &r).member.unwrap().session_id;
+        // A close-on-exec close of the shell image, reported after the exec.
+        let mut before = proc(300, 200, "/bin/zsh");
+        before.pidversion = 5;
+        assert!(t.observe(&open(before), &r).member.is_none());
+        // The agent and its children still belong to the session.
+        let mut agent = proc(300, 200, "/Users/test/.local/bin/2.4.1");
+        agent.pidversion = 6;
+        let member = t.observe(
+            &ev(
+                agent,
+                EventKind::Fork {
+                    child: proc(301, 300, "/x"),
+                },
+            ),
+            &r,
+        );
+        assert_eq!(member.member.unwrap().session_id, session);
+        assert_eq!(
+            t.observe(&open(proc(301, 300, "/x")), &r)
+                .member
+                .unwrap()
+                .session_id,
+            session
+        );
     }
 
     #[test]
