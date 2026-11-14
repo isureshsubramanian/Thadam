@@ -57,7 +57,16 @@ public sealed class ApiTestHost : IAsyncDisposable
     public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct)
     {
         var dataDir = Path.Combine(Path.GetTempPath(), $"thadam-api-test-{Guid.NewGuid():N}");
-        var options = new ApiOptions(storeFolder, Path.Combine(dataDir, "registry.json"), dataDir, 0);
+        // A synthetic dashboard and notices file, so tests don't depend on the web build.
+        var webDir = Path.Combine(dataDir, "web");
+        Directory.CreateDirectory(webDir);
+        await File.WriteAllTextAsync(Path.Combine(webDir, "index.html"), "<!doctype html><title>test dashboard</title>", ct);
+        var options = new ApiOptions(storeFolder, Path.Combine(dataDir, "registry.json"), dataDir, 0)
+        {
+            WebDir = webDir,
+            NoticesPath = Path.Combine(dataDir, "notices.txt"),
+        };
+        await File.WriteAllTextAsync(options.NoticesPath, "synthetic notices", ct);
         await Credentials.SaveAsync(options.CredentialsPath, Credentials.Create(Password), ct);
         await File.WriteAllTextAsync(options.RegistryPath, Registry, ct);
         var app = await ApiHost.BuildAsync(options, TimeProvider.System, ct);

@@ -11,6 +11,7 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    "ISC",
 ]
 confidence-threshold = 0.93
 

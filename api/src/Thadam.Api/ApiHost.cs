@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.FileProviders;
 using Thadam.Api.Endpoints;
 using Thadam.Api.Search;
 using Thadam.Api.Security;
@@ -132,6 +133,14 @@ public static class ApiHost
             return Task.CompletedTask;
         }));
         app.UseStatusCodePages();
+        // The dashboard: static files from the same origin, so one cookie and no CORS
+        // (ADR-008 Decision 1). Public files; every API call still needs the session.
+        if (Directory.Exists(options.WebDir))
+        {
+            var files = new PhysicalFileProvider(options.WebDir);
+            app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
+            app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+        }
         app.UseRouting();
         app.UseAuthentication();
         app.UseAuthorization();
@@ -142,6 +151,10 @@ public static class ApiHost
         MetaEndpoints.Map(api);
         QueryEndpoints.Map(api);
         SearchEndpoints.Map(api);
+        // Licence notices are readable without signing in (ADR-008 Dependencies).
+        app.MapGet("/notices", () => File.Exists(options.NoticesPath)
+            ? Results.File(options.NoticesPath, "text/plain; charset=utf-8")
+            : Results.NotFound());
         app.Lifetime.ApplicationStopped.Register(() =>
         {
             search.DisposeAsync().AsTask().GetAwaiter().GetResult();

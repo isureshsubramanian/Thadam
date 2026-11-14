@@ -11,6 +11,12 @@
     <ProjectReference Include="../Thadam.Store/Thadam.Store.csproj" />
     <ProjectReference Include="../Thadam.Audit/Thadam.Audit.csproj" />
   </ItemGroup>
+  <!-- Shipped with the API: the built dashboard and the notices file (ADR-008 Decision 1,
+       Dependencies). Missing until web/ is built; the API then serves no dashboard. -->
+  <ItemGroup>
+    <Content Include="../../../web/dist/**" LinkBase="wwwroot" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../../../THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thadam.Api.Tests" />
   </ItemGroup>

@@ -16,6 +16,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "tests"
 cargo test --workspace
 
+step "web: install from the lock file, types, lint, tests, build"
+# Before the API: its build copies web/dist next to it, and the notices read the bundle list.
+(
+    cd web
+    npm ci --prefer-offline --no-audit --no-fund
+    npm run --silent typecheck
+    npm run --silent lint
+    npm test --silent
+    npx vite build --logLevel warn
+)
+
 step "api: format, build (warnings as errors), tests"
 # Run inside api/ so its global.json (SDK pin, test runner) applies.
 (
@@ -28,7 +39,7 @@ step "api: format, build (warnings as errors), tests"
 step "licence policy"
 cargo deny check licenses bans sources
 
-step "third-party notices up to date (licence policy for NuGet too)"
+step "third-party notices up to date (licence policy for NuGet and npm too)"
 tmp="$(mktemp)"
 out="$(mktemp)"
 trap 'rm -f "$tmp" "$out"' EXIT
@@ -60,7 +71,21 @@ if [[ ! -s "$names" ]]; then
     echo "missing name list: $names (one name per line)"
     exit 1
 fi
-if grep -rniwF -f "$names" --exclude-dir=.build --exclude-dir=bin --exclude-dir=obj --exclude=.name-gate.local crates/ macos/ api/ scripts/ README.md Cargo.toml; then
+hits="$(grep -rniwF -f "$names" --exclude-dir=.build --exclude-dir=bin --exclude-dir=obj --exclude-dir=node_modules \
+    --exclude-dir=dist --exclude=.name-gate.local crates/ macos/ api/ web/ scripts/ README.md Cargo.toml || true)"
+# One exception, data the language requires: in .css files, the declaration of CSS's
+# pointer-shape property with the values `pointer` or `default`. It is removed from the
+# line before the line is checked again, so any other use of a name on it still fails.
+hits="$(printf '%s\n' "$hits" | perl -e '
+    open my $f, "<", shift or die; chomp(my @n = grep { /\S/ } <$f>);
+    my $re = join "|", map { quotemeta } @n;
+    while (<STDIN>) {
+        my ($file, $text) = /^([^:]+):\d+:(.*)$/ or next;
+        $text =~ s/\b(?:c)ursor:\s*(?:pointer|default)\b//gi if $file =~ /\.css$/;
+        print if $text =~ /\b(?:$re)\b/i;
+    }' "$names")"
+if [[ -n "$hits" ]]; then
+    printf '%s\n' "$hits"
     echo "product names found in source (allowed only in adapters and the registry file)"
     exit 1
 fi

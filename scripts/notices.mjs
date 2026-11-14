@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// Licence check and notices for the API's NuGet packages (ADR-008 Dependencies).
+// Licence check and notices for the API's NuGet packages and the dashboard's npm packages
+// (ADR-008 Dependencies).
 //
 //   node scripts/notices.mjs <cargo-about output> > THIRD-PARTY-NOTICES.txt
 //
-// Appends a .NET section to the Rust section that cargo-about generates. Every package of a
-// shipped project (api/src) must have a licence on deny.toml's allow list (or a recorded
-// exception) and a licence text: from the package itself, or from scripts/notices-input.
-// Test-only packages (api/tests) are licence-checked but not listed. Fails, naming the
-// package, when anything is missing. No network access; no npm packages.
+// Appends a .NET section and an npm section to the Rust section that cargo-about generates.
+// Every shipped package (api/src; npm packages in the dashboard bundle) must have a licence
+// on deny.toml's allow list (or a recorded exception) and a licence text. Test-only NuGet
+// packages and build-only npm packages are licence-checked but not listed. Fails, naming
+// the package, when anything is missing. No network access; no npm packages.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -87,6 +88,74 @@ function matches(pattern, id) {
   return pattern.endsWith(".*") ? id.startsWith(pattern.slice(0, -1)) : pattern === id;
 }
 
+/**
+ * Build and test tools for the dashboard: never shipped, so no credit is owed, but they
+ * must still be permissive (ADR-008 Dependencies). The shipped allow list plus these
+ * permissive licences; nothing copyleft, share-alike, non-commercial or unstated.
+ */
+const npmBuildOnlyExtra = new Set(["BSD-2-Clause", "BSD-3-Clause", "ISC", "BlueOak-1.0.0", "MIT-0", "CC0-1.0", "0BSD"]);
+
+function npmLicence(pkg) {
+  if (typeof pkg.license === "string") return pkg.license.replace(/^\((.*)\)$/, "$1");
+  if (Array.isArray(pkg.licenses)) return pkg.licenses.map((l) => l.type).join(" OR ");
+  return "not stated";
+}
+
+/**
+ * The npm section: the packages in the dashboard bundle (web/dist-packages.json, written by
+ * the build), each with its whole licence file and any NOTICE file. Every other installed
+ * package is licence-checked as build-only.
+ */
+function npmSection(allowed) {
+  const web = join(root, "web");
+  const bundledFile = join(web, "dist-packages.json");
+  if (!existsSync(bundledFile)) fail("web/dist-packages.json missing: run npm run build in web/");
+  const bundled = new Set(JSON.parse(readFileSync(bundledFile, "utf8")));
+  const lock = JSON.parse(readFileSync(join(web, "package-lock.json"), "utf8"));
+  const buildAllowed = new Set([...allowed, ...npmBuildOnlyExtra]);
+  const shipped = [];
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (!path) continue;
+    const name = path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
+    const dir = join(web, path);
+    // Optional packages for other platforms are in the lock file but not installed.
+    if (!existsSync(join(dir, "package.json"))) {
+      if (entry.optional) continue;
+      fail(`${name}: not installed (run npm ci in web/)`);
+    }
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    const licence = npmLicence(pkg);
+    if (bundled.has(name)) {
+      if (!licenceOk(licence, allowed)) fail(`${name} ${pkg.version}: licence ${licence} is not allowed`);
+      const files = readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice)/i.test(f)).sort();
+      if (!files.some((f) => !/^notice/i.test(f))) fail(`${name} ${pkg.version}: no licence file in the package`);
+      shipped.push({
+        id: name,
+        version: pkg.version,
+        licence,
+        copyright: "",
+        texts: files.map((f) => ({ name: f, body: readFileSync(join(dir, f), "utf8") })),
+      });
+    } else if (!licenceOk(licence, buildAllowed)) {
+      fail(`${name} ${pkg.version} (build only): licence ${licence} is not allowed`);
+    }
+  }
+  for (const name of bundled) {
+    if (!shipped.some((p) => p.id === name)) fail(`${name}: in the bundle but not in web/package-lock.json`);
+  }
+  return shipped.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function write(sections) {
+  let out = "";
+  for (const s of sections) {
+    out += `\n${"-".repeat(80)}\n${`${s.id} ${s.version}`.trim()}\nLicence: ${s.licence}\n`;
+    if (s.copyright) out += `${s.version ? "Copyright" : "Note"}: ${s.copyright}\n`;
+    for (const t of s.texts) out += `\n--- ${t.name}\n\n${t.body.replace(/\s*$/, "\n")}`;
+  }
+  return out;
+}
+
 function main() {
   const [aboutFile] = process.argv.slice(2);
   if (!aboutFile) fail("usage: node scripts/notices.mjs <cargo-about output>");
@@ -144,11 +213,9 @@ function main() {
       })),
     });
   }
-  for (const s of sections) {
-    out += `\n${"-".repeat(80)}\n${`${s.id} ${s.version}`.trim()}\nLicence: ${s.licence}\n`;
-    if (s.copyright) out += `${s.version ? "Copyright" : "Note"}: ${s.copyright}\n`;
-    for (const t of s.texts) out += `\n--- ${t.name}\n\n${t.body.replace(/\s*$/, "\n")}`;
-  }
+  out += write(sections);
+  out += `\n${rule}\nNPM PACKAGES (the dashboard, web/; served by the API)\n${rule}\n`;
+  out += write(npmSection(allowed));
   process.stdout.write(out);
 }
 

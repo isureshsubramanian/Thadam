@@ -15,6 +15,7 @@
 !/crates/
 !/macos/
 !/api/
+!/web/
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
@@ -29,6 +30,9 @@ target/
 bin/
 obj/
 TestResults/
+node_modules/
+/web/dist/
+/web/dist-packages.json
 *.db
 *.db-wal
 *.db-shm

@@ -14,6 +14,12 @@ public sealed record ApiOptions(string StorePath, string RegistryPath, string Da
 
     public string SearchPath => Path.Combine(DataDir, "search.db");
 
+    /// <summary>The built dashboard (web/dist), copied next to the API at build time.</summary>
+    public string WebDir { get; init; } = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+
+    /// <summary>The generated third-party notices, shipped with the API (served at /notices).</summary>
+    public string NoticesPath { get; init; } = Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.txt");
+
     /// <summary>The defaults: the root-owned store and registry, the user's own API folder.</summary>
     public static ApiOptions Defaults() => new(
         Path.Combine(SystemFolder, "store"),
