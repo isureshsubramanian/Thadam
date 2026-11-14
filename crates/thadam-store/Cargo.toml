@@ -1,0 +1,18 @@
+[package]
+name = "thadam-store"
+description = "Append-only, hash-chained SQLite event store for Thadam."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thadam-core.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true

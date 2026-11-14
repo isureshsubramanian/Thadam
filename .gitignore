@@ -1,0 +1,27 @@
+# Allowlist: ignore everything, then allow only publishable source and build files.
+# Docs, ADRs, research, probe output, local instruction files and all data stay local.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/Cargo.toml
+!/Cargo.lock
+!/rust-toolchain.toml
+!/clippy.toml
+!/deny.toml
+!/about.toml
+!/about.hbs
+!/THIRD-PARTY-NOTICES.txt
+!/crates/
+!/scripts/
+/scripts/*
+!/scripts/gate.sh
+
+# Never commit data or build output, even inside allowed folders.
+target/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.jsonl
+.DS_Store

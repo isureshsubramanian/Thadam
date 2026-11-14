@@ -1,0 +1,12 @@
+# Input for cargo-about, which generates THIRD-PARTY-NOTICES.txt. Do not edit the output.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+ignore-dev-dependencies = true
+# Credit only what ships in the macOS build; our own (unpublished) crates are not third-party.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+private = { ignore = true }
