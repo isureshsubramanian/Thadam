@@ -10,6 +10,8 @@ const string Usage = """
       thadam-api run [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>]
       thadam-api set-password [--data-dir <folder>]
       thadam-api verify-audit [--data-dir <folder>]
+      thadam-api install [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>]
+      thadam-api uninstall
     """;
 
 using var cts = new CancellationTokenSource();
@@ -35,6 +37,10 @@ switch (command)
         return await Commands.SetPasswordAsync(options, cts.Token);
     case "verify-audit":
         return await Commands.VerifyAuditAsync(options, cts.Token);
+    case "install":
+        return await LaunchAgent.InstallAsync(options, cts.Token);
+    case "uninstall":
+        return await LaunchAgent.UninstallAsync(cts.Token);
     default:
         await Console.Error.WriteLineAsync(Usage);
         return 2;
