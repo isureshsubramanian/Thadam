@@ -19,6 +19,8 @@ pub struct Membership {
     pub session_id: Arc<str>,
     pub project: Option<Arc<str>>,
     pub root_pid: u32,
+    /// The session that started this one, when one tool delegated to another (ADR-004).
+    pub parent_session_id: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,8 +36,22 @@ pub struct Observation {
     /// Membership of the process the event is about, after the event (after exec, the
     /// new image's).
     pub member: Option<Membership>,
+    /// The session whose record this event becomes. Same as `member`, except for the exec
+    /// that starts a delegated session: deciding to run the other tool is the delegating
+    /// tool's action, so that one row belongs to the parent session (ADR-004 Decision 3).
+    pub actor: Option<Membership>,
     /// Set when the event was the exit of a session root.
     pub session_ended: Option<Arc<str>>,
+}
+
+impl Observation {
+    fn same(member: Option<Membership>, session_ended: Option<Arc<str>>) -> Self {
+        Self {
+            actor: member.clone(),
+            member,
+            session_ended,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -60,18 +76,22 @@ impl ProcessTree {
         self.members.is_empty()
     }
 
-    /// Seeds membership from the start-up snapshot. A root nested under a root of the same
-    /// tool joins the outer session, as it would have if its exec had been observed.
+    /// Seeds membership from the start-up snapshot, as if the roots' execs had been
+    /// observed: a root nested under a root of the same tool joins the outer session, and
+    /// one nested under a different tool starts a session linked to it.
     pub fn seed(&mut self, snapshot: &Snapshot) {
         let mut sessions: HashMap<u32, Membership> = HashMap::new();
         for root in &snapshot.roots {
-            let outer = enclosing_same_tool(snapshot, &sessions, root.pid, root.tool);
-            let membership = outer.unwrap_or_else(|| Membership {
-                tool: root.tool,
-                session_id: new_session_id(),
-                project: project_from_cwd(root.cwd.as_deref()),
-                root_pid: root.pid,
-            });
+            let membership = match enclosing(snapshot, &sessions, root.pid) {
+                Some(outer) if outer.tool == root.tool => outer,
+                outer => Membership {
+                    tool: root.tool,
+                    session_id: new_session_id(),
+                    project: project_from_cwd(root.cwd.as_deref()),
+                    root_pid: root.pid,
+                    parent_session_id: outer.map(|m| m.session_id),
+                },
+            };
             sessions.insert(root.pid, membership);
         }
         for (pid, root) in &snapshot.members {
@@ -92,21 +112,31 @@ impl ProcessTree {
         let current = self.resolve(&event.process);
         match &event.kind {
             EventKind::Exec { target, cwd, .. } => {
-                let member = match registry.match_identity(&target.executable, &target.identity) {
-                    Some(tool) if current.as_ref().is_some_and(|m| m.tool == tool) => current,
-                    Some(tool) => Some(Membership {
-                        tool,
-                        session_id: new_session_id(),
-                        project: project_from_cwd(cwd.as_deref()),
-                        root_pid: event.process.pid,
-                    }),
-                    None => current,
+                let (member, actor) = match registry
+                    .match_identity(&target.executable, &target.identity)
+                {
+                    Some(tool) if current.as_ref().is_some_and(|m| m.tool == tool) => {
+                        (current.clone(), current)
+                    }
+                    Some(tool) => {
+                        let started = Membership {
+                            tool,
+                            session_id: new_session_id(),
+                            project: project_from_cwd(cwd.as_deref()),
+                            root_pid: event.process.pid,
+                            parent_session_id: current.as_ref().map(|m| Arc::clone(&m.session_id)),
+                        };
+                        let actor = current.or_else(|| Some(started.clone()));
+                        (Some(started), actor)
+                    }
+                    None => (current.clone(), current),
                 };
                 if let Some(m) = &member {
                     self.insert(event.process.pid, target.pidversion, m.clone());
                 }
                 Observation {
                     member,
+                    actor,
                     session_ended: None,
                 }
             }
@@ -114,25 +144,16 @@ impl ProcessTree {
                 if let Some(m) = &current {
                     self.insert(child.pid, child.pidversion, m.clone());
                 }
-                Observation {
-                    member: current,
-                    session_ended: None,
-                }
+                Observation::same(current, None)
             }
             EventKind::Exit => {
                 let session_ended = current.as_ref().and_then(|m| {
                     (m.root_pid == event.process.pid).then(|| Arc::clone(&m.session_id))
                 });
                 self.members.remove(&event.process.pid);
-                Observation {
-                    member: current,
-                    session_ended,
-                }
+                Observation::same(current, session_ended)
             }
-            _ => Observation {
-                member: current,
-                session_ended: None,
-            },
+            _ => Observation::same(current, None),
         }
     }
 
@@ -179,18 +200,17 @@ impl ProcessTree {
     }
 }
 
-/// For a nested root: the session of the enclosing root, if that root is the same tool. The
-/// root's own member entry points to itself, so look at its parent's. Roots arrive ancestors
-/// first, so the enclosing session is already in `sessions`.
-fn enclosing_same_tool(
+/// For a nested root: the session of the nearest enclosing root, whatever its tool. The
+/// root's own member entry points to itself, so look at its parent's. Roots arrive
+/// ancestors first, so the enclosing session is already in `sessions`.
+fn enclosing(
     snapshot: &Snapshot,
     sessions: &HashMap<u32, Membership>,
     root_pid: u32,
-    tool: ToolId,
 ) -> Option<Membership> {
     let parent = snapshot.parents.get(&root_pid)?;
     let outer_root = snapshot.members.get(parent)?;
-    sessions.get(outer_root).filter(|m| m.tool == tool).cloned()
+    sessions.get(outer_root).cloned()
 }
 
 fn new_session_id() -> Arc<str> {
@@ -465,6 +485,118 @@ mod tests {
             "nested same-tool root joins the outer session"
         );
         assert_eq!(a.project.as_deref(), Some("/Users/test/p"));
+    }
+
+    fn exec_other(pid: u32, ppid: u32) -> OsEvent {
+        let target = signed(
+            proc(pid, ppid, "/Users/test/.nvm/bin/other"),
+            "TEAM000002",
+            "com.example.other",
+        );
+        ev(
+            proc(pid, ppid, "/Users/test/.nvm/bin/node"),
+            EventKind::Exec {
+                target,
+                args: vec!["other".into(), "exec".into()],
+                cwd: Some("/Users/test/projects/demo".into()),
+            },
+        )
+    }
+
+    #[test]
+    fn delegated_tool_gets_a_linked_session_and_the_parent_owns_the_exec() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let root = t
+            .observe(&exec_agent(300, 200, "/Users/test/projects/demo"), &r)
+            .member
+            .unwrap();
+        assert_eq!(root.parent_session_id, None);
+        // agent -> shell -> interpreter -> other tool
+        t.observe(&fork(300, 310), &r);
+        t.observe(&fork(310, 320), &r);
+        let obs = t.observe(&exec_other(320, 310), &r);
+        let child = obs.member.unwrap();
+        assert_eq!(r.tool(child.tool).unwrap().key, "other_agent");
+        assert_ne!(child.session_id, root.session_id);
+        assert_eq!(child.parent_session_id, Some(Arc::clone(&root.session_id)));
+        // The delegating exec is the agent's own action.
+        assert_eq!(obs.actor.unwrap().session_id, root.session_id);
+
+        // The other tool's descendants inherit the link and their rows are its own.
+        t.observe(&fork(320, 330), &r);
+        let build = t.observe(&open(proc(330, 320, "/Users/test/.cargo/bin/cargo")), &r);
+        let m = build.actor.unwrap();
+        assert_eq!(m.session_id, child.session_id);
+        assert_eq!(m.parent_session_id, Some(Arc::clone(&root.session_id)));
+    }
+
+    #[test]
+    fn three_levels_link_each_session_to_its_immediate_parent() {
+        let r = registry(true);
+        let mut t = ProcessTree::new(true);
+        let a = t
+            .observe(&exec_agent(300, 200, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        t.observe(&fork(300, 310), &r);
+        let b = t.observe(&exec_other(310, 300), &r).member.unwrap();
+        t.observe(&fork(310, 320), &r);
+        let c = t
+            .observe(&exec_agent(320, 310, "/Users/test/p"), &r)
+            .member
+            .unwrap();
+        assert_eq!(b.parent_session_id, Some(Arc::clone(&a.session_id)));
+        assert_eq!(c.parent_session_id, Some(Arc::clone(&b.session_id)));
+        assert_ne!(c.session_id, a.session_id);
+    }
+
+    #[test]
+    fn snapshot_links_a_running_delegated_tool_to_its_parent() {
+        let r = registry(true);
+        let id = |team: &str, sid: &str| signed(proc(1, 0, "/x"), team, sid).identity;
+        let agent = r
+            .match_identity("/x", &id("TEAM000001", "com.example.cli-agent"))
+            .unwrap();
+        let other = r
+            .match_identity("/x", &id("TEAM000002", "com.example.other"))
+            .unwrap();
+        let mut snap = Snapshot::default();
+        snap.roots.push(SnapshotRoot {
+            pid: 300,
+            tool: agent,
+            cwd: Some("/Users/test/p".into()),
+        });
+        snap.roots.push(SnapshotRoot {
+            pid: 320,
+            tool: other,
+            cwd: Some("/Users/test/p".into()),
+        });
+        for (pid, root, parent) in [
+            (300, 300, 200),
+            (310, 300, 300),
+            (320, 320, 310),
+            (330, 320, 320),
+        ] {
+            snap.members.insert(pid, root);
+            snap.parents.insert(pid, parent);
+        }
+        let mut t = ProcessTree::new(true);
+        t.seed(&snap);
+        let parent = t
+            .observe(&open(proc(310, 300, "/bin/zsh")), &r)
+            .member
+            .unwrap();
+        let child = t
+            .observe(&open(proc(330, 320, "/bin/x")), &r)
+            .member
+            .unwrap();
+        assert_eq!(r.tool(child.tool).unwrap().key, "other_agent");
+        assert_eq!(
+            child.parent_session_id,
+            Some(Arc::clone(&parent.session_id))
+        );
+        assert_eq!(parent.parent_session_id, None);
     }
 
     #[test]

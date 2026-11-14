@@ -86,6 +86,7 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
         ts: event.ts,
         tool: tool.key.clone(),
         session_id: Some(member.session_id.to_string()),
+        parent_session_id: member.parent_session_id.as_deref().map(str::to_string),
         pid: event.process.pid,
         process_path,
         category,
@@ -189,6 +190,7 @@ mod tests {
             session_id: Arc::from("s1"),
             project: project.map(Arc::from),
             root_pid: 300,
+            parent_session_id: None,
         }
     }
 

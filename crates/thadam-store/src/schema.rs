@@ -6,7 +6,9 @@ use thadam_core::{Action, Category, Outcome, WireName};
 
 use crate::StoreError;
 
-pub const SCHEMA_VERSION: i64 = 1;
+/// 2 since ADR-004 (`parent_session_id`, encoding v2). Version 1 files are refused, not
+/// migrated: the only v1 data was pilot test runs.
+pub const SCHEMA_VERSION: i64 = 2;
 
 fn in_list<T: WireName>(all: &[T]) -> String {
     all.iter()
@@ -31,6 +33,7 @@ pub fn apply(conn: &Connection) -> Result<(), StoreError> {
             ts_us        INTEGER NOT NULL,
             tool         TEXT    NOT NULL,
             session_id   TEXT,
+            parent_session_id TEXT,
             pid          INTEGER NOT NULL,
             process_path TEXT    NOT NULL,
             category     TEXT    NOT NULL CHECK (category IN ({categories})),
@@ -51,6 +54,8 @@ pub fn apply(conn: &Connection) -> Result<(), StoreError> {
         CREATE INDEX events_ts ON events (ts_us);
         CREATE INDEX events_tool_ts ON events (tool, ts_us);
         CREATE INDEX events_session ON events (session_id, seq);
+        CREATE INDEX events_parent_session ON events (parent_session_id, seq)
+            WHERE parent_session_id IS NOT NULL;
         CREATE TRIGGER events_no_update BEFORE UPDATE ON events
             BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
         CREATE TRIGGER events_no_delete BEFORE DELETE ON events

@@ -36,6 +36,7 @@ fn file_read(path: &str) -> NewEvent {
         ts: datetime!(2026-11-12 16:20:09 UTC),
         tool: "tool-a".into(),
         session_id: Some("s-7f3e".into()),
+        parent_session_id: None,
         pid: 48211,
         process_path: "/bin/cat".into(),
         category: Category::File,
@@ -282,6 +283,63 @@ fn invalid_input_is_rejected_before_storage() {
     let mut no_source = file_read("/x");
     no_source.sources.clear();
     assert!(EventRecord::new(no_source, &redactor).is_err());
+}
+
+#[test]
+fn version_1_files_are_refused() {
+    let dir = TempDir::new("v1");
+    {
+        let conn = rusqlite::Connection::open(dir.db()).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    assert!(matches!(
+        Store::open(dir.db()),
+        Err(thadam_store::StoreError::SchemaVersion(1))
+    ));
+    assert!(matches!(
+        Store::open_read_only(dir.db()),
+        Err(thadam_store::StoreError::SchemaVersion(1))
+    ));
+}
+
+#[test]
+fn delegated_rows_store_and_verify_their_parent_session() {
+    let dir = TempDir::new("parent");
+    let redactor = Redactor::with_default_detectors().unwrap();
+    let mut store = Store::open(dir.db()).unwrap();
+    let mut child = file_read("/Users/dev/projects/sample-app/build.rs");
+    child.session_id = Some("s-child".into());
+    child.parent_session_id = Some("s-7f3e".into());
+    store
+        .append(&EventRecord::new(file_read("/x"), &redactor).unwrap())
+        .unwrap();
+    store
+        .append(&EventRecord::new(child, &redactor).unwrap())
+        .unwrap();
+    let parents: Vec<Option<String>> = store
+        .connection()
+        .prepare("SELECT parent_session_id FROM events ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(parents, vec![None, Some("s-7f3e".to_string())]);
+    assert!(store.verify().unwrap().is_ok());
+
+    // Changing only the link breaks the chain at that row.
+    drop_triggers(&store);
+    store
+        .connection()
+        .execute(
+            "UPDATE events SET parent_session_id = 's-other' WHERE seq = 2",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        store.verify().unwrap().broken,
+        Some(ChainBreak::HashMismatch { seq: 2, .. })
+    ));
 }
 
 #[test]

@@ -108,17 +108,18 @@ impl Store {
         let row = record.to_row(seq);
         let hash = row_hash(&prev_hash, &row)?;
         tx.execute(
-            "INSERT INTO events (seq, event_id, ts_us, tool, session_id, pid, process_path, category,
-                action, target, outcome, size_bytes, bytes_out, bytes_in, project, flags, count,
-                detections, source, prev_hash, hash)
+            "INSERT INTO events (seq, event_id, ts_us, tool, session_id, parent_session_id, pid,
+                process_path, category, action, target, outcome, size_bytes, bytes_out, bytes_in,
+                project, flags, count, detections, source, prev_hash, hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21)",
+                ?18, ?19, ?20, ?21, ?22)",
             params![
                 row.seq,
                 row.event_id,
                 row.ts_us,
                 row.tool,
                 row.session_id,
+                row.parent_session_id,
                 row.pid,
                 row.process_path,
                 row.category,
@@ -148,9 +149,9 @@ impl Store {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
         let total = u64::try_from(total).unwrap_or(0);
         let mut stmt = self.conn.prepare(
-            "SELECT seq, event_id, ts_us, tool, session_id, pid, process_path, category, action,
-                target, outcome, size_bytes, bytes_out, bytes_in, project, flags, count,
-                detections, source, prev_hash, hash
+            "SELECT seq, event_id, ts_us, tool, session_id, parent_session_id, pid, process_path,
+                category, action, target, outcome, size_bytes, bytes_out, bytes_in, project, flags,
+                count, detections, source, prev_hash, hash
              FROM events ORDER BY seq",
         )?;
         let mut rows = stmt.query([])?;
@@ -231,22 +232,23 @@ fn read_row(r: &Row<'_>) -> Option<(CanonicalRow, [u8; 32], [u8; 32])> {
         ts_us: r.get(2).ok()?,
         tool: r.get(3).ok()?,
         session_id: r.get(4).ok()?,
-        pid: r.get(5).ok()?,
-        process_path: r.get(6).ok()?,
-        category: r.get(7).ok()?,
-        action: r.get(8).ok()?,
-        target: r.get(9).ok()?,
-        outcome: r.get(10).ok()?,
-        size_bytes: r.get(11).ok()?,
-        bytes_out: r.get(12).ok()?,
-        bytes_in: r.get(13).ok()?,
-        project: r.get(14).ok()?,
-        flags: r.get(15).ok()?,
-        count: r.get(16).ok()?,
-        detections: r.get(17).ok()?,
-        source: r.get(18).ok()?,
+        parent_session_id: r.get(5).ok()?,
+        pid: r.get(6).ok()?,
+        process_path: r.get(7).ok()?,
+        category: r.get(8).ok()?,
+        action: r.get(9).ok()?,
+        target: r.get(10).ok()?,
+        outcome: r.get(11).ok()?,
+        size_bytes: r.get(12).ok()?,
+        bytes_out: r.get(13).ok()?,
+        bytes_in: r.get(14).ok()?,
+        project: r.get(15).ok()?,
+        flags: r.get(16).ok()?,
+        count: r.get(17).ok()?,
+        detections: r.get(18).ok()?,
+        source: r.get(19).ok()?,
     };
-    let prev: Vec<u8> = r.get(19).ok()?;
-    let hash: Vec<u8> = r.get(20).ok()?;
+    let prev: Vec<u8> = r.get(20).ok()?;
+    let hash: Vec<u8> = r.get(21).ok()?;
     Some((row, to_array(&prev)?, to_array(&hash)?))
 }

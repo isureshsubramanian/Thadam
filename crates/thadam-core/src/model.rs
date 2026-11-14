@@ -124,6 +124,9 @@ pub struct NewEvent {
     pub tool: String,
     #[garde(inner(length(min = 1, max = MAX_SESSION_ID)))]
     pub session_id: Option<String>,
+    /// The session that started this one, when one tool delegated to another (ADR-004).
+    #[garde(inner(length(min = 1, max = MAX_SESSION_ID)))]
+    pub parent_session_id: Option<String>,
     #[garde(skip)]
     pub pid: u32,
     #[garde(length(min = 1, max = MAX_PATH))]
@@ -200,6 +203,7 @@ pub struct EventRecord {
     ts_us: i64,
     tool: String,
     session_id: Option<String>,
+    parent_session_id: Option<String>,
     pid: u32,
     process_path: String,
     category: Category,
@@ -238,6 +242,7 @@ impl EventRecord {
             ts_us,
             tool: input.tool,
             session_id: input.session_id,
+            parent_session_id: input.parent_session_id,
             pid: input.pid,
             process_path: input.process_path,
             category: input.category,
@@ -281,6 +286,7 @@ impl EventRecord {
             ts_us: self.ts_us,
             tool: self.tool.clone(),
             session_id: self.session_id.clone(),
+            parent_session_id: self.parent_session_id.clone(),
             pid: i64::from(self.pid),
             process_path: self.process_path.clone(),
             category: self.category.wire_name().to_string(),

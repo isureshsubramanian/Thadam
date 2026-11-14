@@ -17,7 +17,9 @@ const REGISTRY: &str = r#"{
   "tools": [
     { "key": "cli_agent",
       "match": [ { "team_id": "TEAM000001", "signing_id": "com.example.cli-agent" } ],
-      "state_dirs": [ "~/.cli-agent/" ] }
+      "state_dirs": [ "~/.cli-agent/" ] },
+    { "key": "second_agent",
+      "match": [ { "team_id": "TEAM000002", "signing_id": "com.example.second-agent" } ] }
   ]
 }"#;
 
@@ -416,4 +418,72 @@ fn interrupt_stops_cleanly_and_flushes_open_windows() {
     );
     // The 47-read window was still open when the signal arrived.
     assert!(rows(&db).iter().any(|r| r.3 == 47));
+}
+
+/// A process signed as the second registered tool.
+fn second_tool(pid: u32, ppid: u32) -> String {
+    process(pid, ppid, "/Users/test/.nvm/bin/second-agent", false).replace(
+        r#""team_id":"","signing_id":"com.example.other""#,
+        r#""team_id":"TEAM000002","signing_id":"com.example.second-agent""#,
+    )
+}
+
+#[test]
+fn delegated_sessions_are_linked_to_their_parent() {
+    // agent -> shell -> interpreter -> second tool -> build tool (live run 2's chain)
+    let shell0 = process(4211, 4100, "/bin/zsh", false);
+    let agent = process(4211, 4100, "/Users/test/.local/bin/2.4.1", true);
+    let shell = process(4300, 4211, "/bin/zsh", false);
+    let node = process(4301, 4300, "/Users/test/.nvm/bin/node", false);
+    let second = second_tool(4301, 4300);
+    let cargo = process(4400, 4301, "/Users/test/.cargo/bin/cargo", false);
+    let cwd = file("/Users/test/projects/demo");
+    let lines = [
+        line(1, 0, &shell0, "exec", &format!(r#"{{"target":{agent},"args":["agent"],"cwd":{cwd}}}"#)),
+        line(2, 1, &agent, "fork", &format!(r#"{{"child":{shell}}}"#)),
+        line(3, 1, &shell, "fork", &format!(r#"{{"child":{node}}}"#)),
+        line(4, 2, &node, "exec", &format!(r#"{{"target":{second},"args":["second-agent","exec","fix the tests"],"cwd":{cwd}}}"#)),
+        line(5, 3, &second, "fork", &format!(r#"{{"child":{cargo}}}"#)),
+        line(6, 4, &cargo, "create", &format!(r#"{{"destination":{{"existing_file":{}}}}}"#, file("/Users/test/projects/demo/target/debug/demo"))),
+    ]
+    .join("\n")
+        + "\n";
+    let dir = TempDir::new("delegation");
+    let (out, db) = run_stdin(&dir, &lines, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let store = Store::open_read_only(&db).unwrap();
+    assert!(store.verify().unwrap().is_ok());
+    let got: Vec<(String, String, String, Option<String>)> = store
+        .connection()
+        .prepare("SELECT tool, action, session_id, parent_session_id FROM events ORDER BY seq")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(got.len(), 3, "{got:?}");
+    let (agent_session, delegated_session) = (&got[0].2, &got[2].2);
+    // Row 1: the agent starts. Row 2: the agent runs the second tool (its own action).
+    assert_eq!(
+        (got[0].0.as_str(), got[0].3.as_deref()),
+        ("cli_agent", None)
+    );
+    assert_eq!(
+        (
+            got[1].0.as_str(),
+            got[1].1.as_str(),
+            &got[1].2,
+            got[1].3.as_deref()
+        ),
+        ("cli_agent", "exec", agent_session, None)
+    );
+    // Row 3: the build output belongs to the second tool's session, linked to the agent's.
+    assert_eq!(got[2].0, "second_agent");
+    assert_ne!(delegated_session, agent_session);
+    assert_eq!(got[2].3.as_deref(), Some(agent_session.as_str()));
 }

@@ -170,6 +170,7 @@ mod tests {
             ts: datetime!(2026-11-14 09:33:00 UTC) + Duration::seconds(secs),
             tool: "cli_agent".into(),
             session_id: Some("s1".into()),
+            parent_session_id: None,
             pid: 4300,
             process_path: "/usr/bin/cat".into(),
             category: Category::File,

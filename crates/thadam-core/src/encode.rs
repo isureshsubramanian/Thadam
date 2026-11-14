@@ -1,4 +1,5 @@
-//! Canonical encoding `thadam.event.v1` (ADR-002, Decision 2).
+//! Canonical encoding `thadam.event.v2` (ADR-002 Decision 2; ADR-004 added
+//! `parent_session_id` and retired v1).
 //!
 //! CONTRACT: these bytes are hashed into the chain. Any reader that verifies the chain
 //! (the store's `verify`, and the .NET API in phase 3) must produce the identical bytes,
@@ -12,7 +13,7 @@
 
 use crate::error::CoreError;
 
-pub const EVENT_DOMAIN: &str = "thadam.event.v1";
+pub const EVENT_DOMAIN: &str = "thadam.event.v2";
 const NULL_MARKER: u32 = u32::MAX;
 
 /// A stored event row in the primitive form that is hashed. The store reads rows back in
@@ -24,6 +25,8 @@ pub struct CanonicalRow {
     pub ts_us: i64,
     pub tool: String,
     pub session_id: Option<String>,
+    /// The session that started this one (ADR-004); `None` for a top-level session.
+    pub parent_session_id: Option<String>,
     pub pid: i64,
     pub process_path: String,
     pub category: String,
@@ -40,7 +43,7 @@ pub struct CanonicalRow {
     pub source: String,
 }
 
-/// Encodes a row in the field order fixed by ADR-002.
+/// Encodes a row in the field order fixed by ADR-002 and ADR-004.
 pub fn encode(row: &CanonicalRow) -> Result<Vec<u8>, CoreError> {
     let mut buf = Vec::with_capacity(256 + row.target.len() + row.process_path.len());
     put_text(&mut buf, EVENT_DOMAIN)?;
@@ -49,6 +52,7 @@ pub fn encode(row: &CanonicalRow) -> Result<Vec<u8>, CoreError> {
     put_int(&mut buf, row.ts_us);
     put_text(&mut buf, &row.tool)?;
     put_opt_text(&mut buf, row.session_id.as_deref())?;
+    put_opt_text(&mut buf, row.parent_session_id.as_deref())?;
     put_int(&mut buf, row.pid);
     put_text(&mut buf, &row.process_path)?;
     put_text(&mut buf, &row.category)?;
@@ -111,6 +115,7 @@ mod tests {
             ts_us: 1_794_583_912_418_000,
             tool: "tool-a".into(),
             session_id: Some("s-7f3e".into()),
+            parent_session_id: None,
             pid: 48211,
             process_path: "/usr/bin/curl".into(),
             category: "command".into(),
@@ -132,7 +137,8 @@ mod tests {
             event_id: "0193a6f2-7c1f-7000-8000-000000000002".into(),
             ts_us: 1_794_583_913_000_000,
             tool: "tool-a".into(),
-            session_id: None,
+            session_id: Some("s-9a01".into()),
+            parent_session_id: Some("s-7f3e".into()),
             pid: 48212,
             process_path: "/bin/cat".into(),
             category: "file".into(),
@@ -157,12 +163,12 @@ mod tests {
         let h1 = row_hash(&GENESIS, &r1).unwrap();
         assert_eq!(
             to_hex(&h1),
-            "b099525a8c121c950c1883826da0a54ab5b5b419bacd0a79027b0035b7aa5822"
+            "cca2e7aa25a5885bf7340e0e111749dad90bb3727401a46090aea3ec6598ba92"
         );
         let h2 = row_hash(&h1, &r2).unwrap();
         assert_eq!(
             to_hex(&h2),
-            "e493417f69e58ea9a8fb902820e0b6a1571afcca5297921270b3ac481b5add68"
+            "ba2352eb629780821ce40c27aa8421ed957e981ce340ba70c60fbb19aae0d586"
         );
     }
 
@@ -173,6 +179,11 @@ mod tests {
         a.project = None;
         b.project = Some(String::new());
         assert_ne!(encode(&a).unwrap(), encode(&b).unwrap());
+        let (mut c, _) = golden_rows();
+        let mut d = c.clone();
+        c.parent_session_id = None;
+        d.parent_session_id = Some(String::new());
+        assert_ne!(encode(&c).unwrap(), encode(&d).unwrap());
     }
 
     #[test]
@@ -194,6 +205,9 @@ mod tests {
         variants.push(v);
         let mut v = base.clone();
         v.detections = String::new();
+        variants.push(v);
+        let mut v = base.clone();
+        v.parent_session_id = Some("s-0000".into());
         variants.push(v);
         for v in variants {
             assert_ne!(row_hash(&GENESIS, &v).unwrap(), h);

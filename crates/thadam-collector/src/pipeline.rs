@@ -108,7 +108,7 @@ impl Pipeline {
 
         let observation = self.tree.observe(&event, &self.registry);
         let mut done = match observation
-            .member
+            .actor
             .as_ref()
             .and_then(|m| classify(&event, m, &self.registry))
         {
