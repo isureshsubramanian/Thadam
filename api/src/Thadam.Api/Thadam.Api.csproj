@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- The API and the dashboard's host (ADR-008 Decision 1). -->
+  <PropertyGroup>
+    <AssemblyName>thadam-api</AssemblyName>
+    <RootNamespace>Thadam.Api</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Thadam.Store/Thadam.Store.csproj" />
+    <ProjectReference Include="../Thadam.Audit/Thadam.Audit.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thadam.Api.Tests" />
+  </ItemGroup>
+</Project>

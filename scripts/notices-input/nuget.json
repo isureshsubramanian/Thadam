@@ -14,17 +14,58 @@
       "source": "https://raw.githubusercontent.com/ericsink/SQLitePCL.raw/ed046114d5a30534e13294d94d78eb73de896ad4/NOTICE.TXT",
       "retrieved": "2026-11-15",
       "note": "Apache-2.0 section 4(d): merged into the notices. Identical at commit 96043b8cff323f21919df86a431c136655d81b4a."
+    },
+    "FluentValidation-License.txt": {
+      "source": "https://raw.githubusercontent.com/FluentValidation/FluentValidation/299ef377bde844af7d28b7aa21786a6853f930e3/License.txt",
+      "retrieved": "2026-11-15",
+      "note": "The repository has no NOTICE file at this commit."
+    },
+    "dotnet-LICENSE.TXT": {
+      "source": "https://raw.githubusercontent.com/dotnet/dotnet/297acf930fb0f5c07fd4e51d78e521b4ad2e5d1f/LICENSE.TXT",
+      "retrieved": "2026-11-15"
     }
   },
   "packages": [
-    { "match": "Microsoft.Data.Sqlite", "texts": ["efcore-LICENSE.txt"] },
-    { "match": "Microsoft.Data.Sqlite.Core", "texts": ["efcore-LICENSE.txt"] },
-    { "match": "SQLitePCLRaw.*", "texts": ["SQLitePCL.raw-LICENSE.TXT", "SQLitePCL.raw-NOTICE.TXT"] }
+    {
+      "match": "Microsoft.Data.Sqlite",
+      "texts": [
+        "efcore-LICENSE.txt"
+      ]
+    },
+    {
+      "match": "Microsoft.Data.Sqlite.Core",
+      "texts": [
+        "efcore-LICENSE.txt"
+      ]
+    },
+    {
+      "match": "SQLitePCLRaw.*",
+      "texts": [
+        "SQLitePCL.raw-LICENSE.TXT",
+        "SQLitePCL.raw-NOTICE.TXT"
+      ]
+    },
+    {
+      "match": "FluentValidation",
+      "texts": [
+        "FluentValidation-License.txt"
+      ]
+    }
   ],
   "exceptions": {
     "SQLite": {
       "licence": "public domain",
       "why": "The SQLite library is dedicated to the public domain (https://sqlite.org/copyright.html). No attribution is owed; its own LICENSE.txt is reproduced as a courtesy. Recorded in ADR-008 Dependencies, approved 2026-11-14."
     }
-  }
+  },
+  "frameworks": [
+    {
+      "name": ".NET runtime and ASP.NET Core (shared framework 11.0)",
+      "licence": "MIT",
+      "note": "Installed with .NET, not shipped by Thadam; listed for completeness (ADR-008 Dependencies).",
+      "texts": [
+        "dotnet-LICENSE.TXT"
+      ]
+    }
+  ]
 }

@@ -132,9 +132,21 @@ function main() {
   const rule = "=".repeat(80);
   let out = readFileSync(aboutFile, "utf8").replace(/\s*$/, "\n");
   out += `\n${rule}\n.NET PACKAGES (the API, api/)\n${rule}\n`;
+  for (const f of input.frameworks ?? []) {
+    sections.push({
+      id: f.name,
+      version: "",
+      licence: f.licence,
+      copyright: f.note,
+      texts: f.texts.map((name) => ({
+        name: `${name} (from ${input.texts[name].source}, retrieved ${input.texts[name].retrieved})`,
+        body: readFileSync(join(inputDir, "nuget", name), "utf8"),
+      })),
+    });
+  }
   for (const s of sections) {
-    out += `\n${"-".repeat(80)}\n${s.id} ${s.version}\nLicence: ${s.licence}\n`;
-    if (s.copyright) out += `Copyright: ${s.copyright}\n`;
+    out += `\n${"-".repeat(80)}\n${`${s.id} ${s.version}`.trim()}\nLicence: ${s.licence}\n`;
+    if (s.copyright) out += `${s.version ? "Copyright" : "Note"}: ${s.copyright}\n`;
     for (const t of s.texts) out += `\n--- ${t.name}\n\n${t.body.replace(/\s*$/, "\n")}`;
   }
   process.stdout.write(out);

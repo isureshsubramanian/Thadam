@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- audit.db: the API's own append-only, hash-chained log (ADR-008 Decision 6). -->
+  <ItemGroup>
+    <ProjectReference Include="../Thadam.Store/Thadam.Store.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thadam.Api.Tests" />
+  </ItemGroup>
+</Project>

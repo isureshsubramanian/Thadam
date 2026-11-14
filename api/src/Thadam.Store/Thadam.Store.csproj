@@ -5,5 +5,7 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thadam.Store.Tests" />
+    <!-- The audit chain uses the same encoding primitives (Wire). -->
+    <InternalsVisibleTo Include="Thadam.Audit" />
   </ItemGroup>
 </Project>

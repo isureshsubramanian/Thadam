@@ -1,5 +1,5 @@
 {
-  "comment": "Shared test vectors. Read by thadam-core (tests/golden_file.rs) and the API (Thadam.Store.Tests/GoldenVectorTests.cs). Synthetic values only.",
+  "comment": "Shared test vectors. Read by thadam-core (tests/golden_file.rs) and the API (Thadam.Store.Tests/GoldenVectorTests.cs, Thadam.Api.Tests/AuditLogTests.cs). Synthetic values only.",
   "event_v2": {
     "domain": "thadam.event.v2",
     "rows": [
@@ -42,6 +42,23 @@
         "last_ts_us": null, "rows": null, "bytes": null, "reason": "low_disk", "detail": null,
         "from_us": 1794700900000000, "to_us": 1794700960000000, "missed": 42,
         "hash": "0b15506ac5347994dda3639160fff66837dcf4b22983f9ef5962c7b655171b60"
+      }
+    ]
+  },
+  "audit_v1": {
+    "comment": "The API's audit.db chain (C# only; vectors from an independent Python implementation).",
+    "domain": "thadam.audit.v1",
+    "rows": [
+      {
+        "seq": 1, "audit_id": "0193b000-0000-7000-8000-000000000001", "ts_us": 1794700800000000,
+        "actor_id": "dev", "action": "sign_in", "target_id": "", "outcome": "failed",
+        "hash": "8b6f536fc18b8b6057a50bd6a6fa5a23de0eeb71cd1f3cbc16c7e5fefc73d8f5"
+      },
+      {
+        "seq": 2, "audit_id": "0193b000-0000-7000-8000-000000000002", "ts_us": 1794700805000000,
+        "actor_id": "dev", "action": "flag_reviewed", "target_id": "0193a6f2-7c1e-7b4a-9d2e-5f8c1a3b6e90",
+        "outcome": "succeeded",
+        "hash": "a088a4c09aed2b560a748cc3575c500b6c6edc9034932801327396ecf2e0fbb8"
       }
     ]
   }
