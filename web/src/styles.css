@@ -4,6 +4,7 @@
   --bg: #f4f6f9; --surface: #ffffff; --surface2: #eef1f5; --border: #dde3ea; --text: #121820; --muted: #525d6b;
   --accent: #1d5bb8; --onAccent: #ffffff; --accentSoft: #e5edf9;
   --hiT: #a3251c; --hiB: #fbe9e7; --meT: #8a4600; --meB: #fcefdf; --loT: #2f5487; --loB: #e6edf7; --okT: #1b6536; --okB: #e3f2e8;
+  --markB: #ffe066; --markT: #241a00;
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
   color-scheme: light;
@@ -13,6 +14,7 @@
     --bg: #0c1016; --surface: #141a22; --surface2: #1b232d; --border: #29323e; --text: #e7ecf2; --muted: #9ba7b5;
     --accent: #6aa3ff; --onAccent: #0c1016; --accentSoft: #182841;
     --hiT: #ff958a; --hiB: #3a1a18; --meT: #ffb874; --meB: #382511; --loT: #a6c6ff; --loB: #18263d; --okT: #86dba1; --okB: #14301e;
+    --markB: #8a6d00; --markT: #fff6d6;
     color-scheme: dark;
   }
 }
@@ -20,6 +22,7 @@
   --bg: #0c1016; --surface: #141a22; --surface2: #1b232d; --border: #29323e; --text: #e7ecf2; --muted: #9ba7b5;
   --accent: #6aa3ff; --onAccent: #0c1016; --accentSoft: #182841;
   --hiT: #ff958a; --hiB: #3a1a18; --meT: #ffb874; --meB: #382511; --loT: #a6c6ff; --loB: #18263d; --okT: #86dba1; --okB: #14301e;
+  --markB: #8a6d00; --markT: #fff6d6;
   color-scheme: dark;
 }
 
@@ -97,6 +100,9 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .kl { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
 .kv { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .ks { font-size: 12.5px; color: var(--muted); }
+
+/* Search matches inside stored text. */
+mark { background: var(--markB); color: var(--markT); border-radius: 2px; padding: 0 1px; }
 
 .scroll { overflow-x: auto; position: relative; } /* holds visually hidden headers inside the scroll box */
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }

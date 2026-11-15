@@ -3,6 +3,7 @@
 import { Copy } from "lucide-react";
 import type { Event } from "../api/schemas";
 import { bytes, categoryName, clock, day, num, utc, words, zone } from "./format";
+import { Highlight, matches } from "./highlight";
 import { FlagPills, IconButton, SeverityPill } from "./ui";
 
 function detail(e: Event): string {
@@ -41,7 +42,16 @@ function Transcript({ path }: { path: string }) {
   );
 }
 
-export function EventTable({ events, showTool, showDay }: { events: readonly Event[]; showTool?: boolean; showDay?: boolean }) {
+/**
+ * `highlight`: a search's free-text terms, marked where they occur. A row that matched on its
+ * process path alone shows that path too, so every row shows why it is there.
+ */
+export function EventTable({ events, showTool, showDay, highlight = [] }: {
+  events: readonly Event[];
+  showTool?: boolean;
+  showDay?: boolean;
+  highlight?: readonly string[];
+}) {
   return (
     <div className="scroll">
       <table className="tbl events">
@@ -65,7 +75,10 @@ export function EventTable({ events, showTool, showDay }: { events: readonly Eve
                 {e.source === "agent" && <span className="detail"><Reported /></span>}
               </td>
               <td className={e.category === "prompt" ? "wrap" : "mono wrap"}>
-                {e.target}
+                <Highlight text={e.target} terms={highlight} />
+                {highlight.length > 0 && !matches(e.target, highlight) && matches(e.processPath, highlight) && (
+                  <span className="detail mono">process <Highlight text={e.processPath} terms={highlight} /></span>
+                )}
                 {detail(e) !== "" && <span className="detail">{detail(e)}</span>}
                 {e.transcript !== null && <Transcript path={e.transcript} />}
               </td>

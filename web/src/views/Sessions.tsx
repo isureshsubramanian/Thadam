@@ -5,6 +5,7 @@ import { api, Rejected } from "../api/client";
 import type { Session } from "../api/schemas";
 import { OsOnly, TimelineCoverage } from "../app/coverage";
 import { EventTable } from "../app/events";
+import { freeTerms } from "../app/highlight";
 import { ExportButton } from "../app/ExportButton";
 import { num, utc, when } from "../app/format";
 import type { TimeRange } from "../app/range";
@@ -122,7 +123,7 @@ function Timeline({ sessionId }: { sessionId: string }) {
         {rejected !== undefined ? <p className="pad error" role="alert">{rejection(rejected)}</p>
           : page.items === undefined ? page.loading && <Loading />
           : page.items.length === 0 ? <Empty>{q === "" ? "No rows." : "No rows in this session match."}</Empty>
-          : <EventTable events={page.items} showTool showDay />}
+          : <EventTable events={page.items} showTool showDay highlight={freeTerms(q)} />}
       </section>
       <Pager page={page} />
     </div>

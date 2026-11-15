@@ -4,6 +4,7 @@ import { Search as SearchIcon } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
 import { api, Rejected } from "../api/client";
 import { EventTable } from "../app/events";
+import { freeTerms } from "../app/highlight";
 import { ExportButton } from "../app/ExportButton";
 import { bytes, count, num } from "../app/format";
 import { go } from "../app/route";
@@ -88,7 +89,7 @@ function Results({ q }: { q: string }) {
       )}
       {page.items.length > 0 && <div className="row"><ExportButton source={{ q }} /></div>}
       <section className="card">
-        {page.items.length === 0 ? <Empty>No rows match.</Empty> : <EventTable events={page.items} showTool showDay />}
+        {page.items.length === 0 ? <Empty>No rows match.</Empty> : <EventTable events={page.items} showTool showDay highlight={freeTerms(q)} />}
       </section>
       <Pager page={page} />
     </div>

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { groupGaps } from "../app/coverage";
+import { freeTerms, Highlight } from "../app/highlight";
 import { parse, href } from "../app/route";
 import * as fake from "./fake";
 
@@ -238,6 +239,34 @@ describe("dashboard", () => {
     render(<App />);
     const alert = await screen.findByText("Check the tool: value.");
     expect(alert.textContent).not.toContain("secret_name");
+  });
+});
+
+describe("search highlighting", () => {
+  it("takes free words and quoted phrases, not field:value terms", () => {
+    expect(freeTerms('email tool:"CLI agent" "send mail" outcome:denied since:7d Email npm')).toEqual(["email", "send mail", "npm"]);
+    expect(freeTerms("outcome:denied")).toEqual([]);
+  });
+  it("marks every match case-insensitively and keeps stored text as text", () => {
+    const { container } = render(<p><Highlight text="hook.sendEMAIL-validate <b>email</b>" terms={["email"]} /></p>);
+    expect([...container.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["EMAIL", "email"]);
+    expect(container.querySelector("b")).toBeNull();
+    expect(container.textContent).toBe("hook.sendEMAIL-validate <b>email</b>");
+  });
+  it("marks the match in a session search and shows a process path that matched alone", async () => {
+    const byTarget = { ...fake.event, seq: 900, target: "git -c hook.sendemail-validate.enabled=false status" };
+    const byProcess = { ...fake.event, seq: 901, target: "/tmp/out.txt", processPath: "/opt/example/email-tool" };
+    fake.install({
+      ...base,
+      "GET /sessions/s-b1": { status: 200, body: fake.timeline },
+      "GET /events": { status: 200, body: { ...fake.search, items: [byTarget, byProcess] } },
+    });
+    window.location.hash = "#/sessions/s-b1";
+    render(<App />);
+    fireEvent.change(await screen.findByRole("searchbox", { name: "Search this session" }), { target: { value: "email" } });
+    await waitFor(() => { expect(document.querySelectorAll("mark")).toHaveLength(2); });
+    expect([...document.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["email", "email"]);
+    expect(screen.getByText((_, el) => el?.className === "detail mono" && el.textContent === "process /opt/example/email-tool")).toBeTruthy();
   });
 });
 

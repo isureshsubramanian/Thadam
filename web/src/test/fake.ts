@@ -60,7 +60,7 @@ export const flagItem = {
   reviewed: false,
 };
 
-const event = {
+export const event = {
   seq: 40,
   eventId: "0190f1a2-0000-7000-8000-000000000040",
   ts: "2026-11-11T09:01:00.000000Z",
