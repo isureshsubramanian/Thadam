@@ -132,9 +132,9 @@ export function Overview({ range }: { range: TimeRange }) {
             {data.hosts.map((h) => (
               <li key={`${h.target} ${h.category}`}>
                 <span className="mono clip" title={h.target}>{h.target}</span>
-                <span className="pill">{categoryName[h.category] ?? words(h.category)}</span>
-                <HostFlag host={h} />
-                <span className="muted numv">↑ {bytes(h.bytesOut)} · ↓ {bytes(h.bytesIn)}</span>
+                <span className="badges"><span className="pill">{categoryName[h.category] ?? words(h.category)}</span><HostFlag host={h} /></span>
+                <span className="muted numv" title="Sent">↑ {bytes(h.bytesOut)}</span>
+                <span className="muted numv" title="Received">↓ {bytes(h.bytesIn)}</span>
               </li>
             ))}
           </ul>
