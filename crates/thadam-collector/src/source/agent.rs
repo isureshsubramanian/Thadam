@@ -93,6 +93,14 @@ impl AgentListener {
             };
             let send = send.clone();
             std::thread::spawn(move || {
+                // ORDERING: the read timeout is set before the acknowledgement, while the
+                // sender is still waiting for it. The sender closes as soon as it has the
+                // acknowledgement, and macOS refuses socket options on a connection its peer
+                // has closed, so setting it afterwards lost the message whenever the sender
+                // won that race (its line is still buffered and readable).
+                if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
+                    return;
+                }
                 // The acknowledgement: one byte, after the identity is known.
                 if (&stream).write_all(&[ACK]).is_ok() {
                     read_connection(stream, peer, &send);
@@ -166,10 +174,8 @@ pub(crate) fn bind_owned_socket(path: &Path, what: &str) -> io::Result<UnixListe
 /// Sent once the sender's identity has been read (see `serve`).
 pub const ACK: u8 = b'\n';
 
+/// Reads the sender's lines; the caller has set the read timeout (see `serve`).
 fn read_connection(stream: UnixStream, peer: Peer, send: &impl Fn(AgentItem) -> bool) {
-    if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
-        return;
-    }
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
     for _ in 0..MAX_LINES {
@@ -366,6 +372,8 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let mut idle = UnixStream::connect(&path).unwrap();
         let (stream, _) = listener.accept().unwrap();
+        // As `serve` does before acknowledging.
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
         let peer = Peer {
             pid: std::process::id(),
             pidversion: 1,
@@ -373,6 +381,7 @@ mod tests {
         let worker = std::thread::spawn(move || read_connection(stream, peer, &|_| true));
         let mut active = UnixStream::connect(&path).unwrap();
         let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
         let (tx, rx) = mpsc::channel();
         let other = std::thread::spawn(move || {
             read_connection(stream, peer, &|item| tx.send(item).is_ok())

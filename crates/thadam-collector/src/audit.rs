@@ -64,8 +64,10 @@ impl AuditListener {
 
     fn answer(&mut self, stream: &UnixStream) -> AuditReply {
         let error = |error| AuditReply::Error { error };
-        // ORDERING: the sender waits for this reply, so it is still alive while its
-        // identity is read.
+        // ORDERING: the request is read first, so a refused sender gets its reply instead of
+        // a connection closed while it writes. It then waits for the reply, so it is still
+        // alive while its identity is read.
+        let command = read_request(stream);
         let from_api = peer_of(stream)
             .and_then(|p| exe_of(p.pid))
             .is_ok_and(|exe| exe == self.api_bin);
@@ -75,7 +77,7 @@ impl AuditListener {
             );
             return error(AuditError::Refused);
         }
-        let Some(command) = read_request(stream) else {
+        let Some(command) = command else {
             return error(AuditError::Invalid);
         };
         match command {
