@@ -253,26 +253,43 @@ public sealed class StoreQueries(SegmentIndex index)
     {
         ArgumentException.ThrowIfNullOrEmpty(sessionId);
         var spans = await index.ListAsync(ct).ConfigureAwait(false);
-        var ids = new List<string> { sessionId };
-        var frontier = new List<string> { sessionId };
-        while (frontier.Count > 0 && ids.Count < MaxSessionTree)
+        // Each segment is opened once for the whole walk: a child's rows may sit in a later
+        // segment than its parent's, so every level asks every segment.
+        var conns = new List<SqliteConnection>(spans.Count);
+        try
         {
-            var next = new SortedSet<string>(StringComparer.Ordinal);
             foreach (var span in spans)
             {
-                await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
-                await foreach (var r in QueryAsync(conn, null,
-                    $"SELECT DISTINCT session_id FROM events WHERE parent_session_id IN ({InList(frontier.Count)}) AND session_id IS NOT NULL",
-                    frontier, ct).ConfigureAwait(false))
-                {
-                    next.Add(r.GetString(0));
-                }
+                conns.Add(await index.OpenAsync(span, ct).ConfigureAwait(false));
             }
-            frontier = [.. next.Where(s => !ids.Contains(s))];
-            ids.AddRange(frontier);
+            var ids = new List<string> { sessionId };
+            var seen = new HashSet<string>(StringComparer.Ordinal) { sessionId };
+            var frontier = new List<string> { sessionId };
+            while (frontier.Count > 0 && ids.Count < MaxSessionTree)
+            {
+                var next = new SortedSet<string>(StringComparer.Ordinal);
+                foreach (var conn in conns)
+                {
+                    await foreach (var r in QueryAsync(conn, null,
+                        $"SELECT DISTINCT session_id FROM events WHERE parent_session_id IN ({InList(frontier.Count)}) AND session_id IS NOT NULL",
+                        frontier, ct).ConfigureAwait(false))
+                    {
+                        next.Add(r.GetString(0));
+                    }
+                }
+                frontier = [.. next.Where(seen.Add).Take(MaxSessionTree - ids.Count)];
+                ids.AddRange(frontier);
+            }
+            var all = await SummariseAsync(spans, null, ids, ct).ConfigureAwait(false);
+            return [.. all.OrderBy(s => s.SessionId == sessionId ? 0 : 1).ThenBy(s => s.FirstTsUs)];
         }
-        var all = await SummariseAsync(spans, null, ids, ct).ConfigureAwait(false);
-        return [.. all.OrderBy(s => s.SessionId == sessionId ? 0 : 1).ThenBy(s => s.FirstTsUs)];
+        finally
+        {
+            foreach (var conn in conns)
+            {
+                await conn.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     /// <summary>Rows of the given sessions after <paramref name="afterSeq"/>, in seq order.</summary>
@@ -400,6 +417,36 @@ public sealed class StoreQueries(SegmentIndex index)
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// The events with these ids, found with one query per segment and stopping once all are
+    /// found; ids not in the store are left out.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, EventView>> FindEventsAsync(IReadOnlyList<string> eventIds, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(eventIds);
+        var found = new Dictionary<string, EventView>(StringComparer.Ordinal);
+        var wanted = eventIds.Distinct(StringComparer.Ordinal).ToList();
+        foreach (var span in await index.ListAsync(ct).ConfigureAwait(false))
+        {
+            if (wanted.Count == 0)
+            {
+                break;
+            }
+            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT {Columns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false))} FROM events WHERE event_id IN ({InList(wanted.Count)})";
+            AddList(cmd, wanted);
+            await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await r.ReadAsync(ct).ConfigureAwait(false))
+            {
+                var e = ReadEvent(r);
+                found[e.EventId] = e;
+            }
+            wanted.RemoveAll(found.ContainsKey);
+        }
+        return found;
     }
 
     private async Task<IReadOnlyList<SessionSummary>> SummariseAsync(

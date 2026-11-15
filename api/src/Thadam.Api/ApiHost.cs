@@ -61,7 +61,8 @@ public static class ApiHost
         var audit = await (options.AuditSocket is { } socket
             ? AuditLog.OpenCollectorAsync(options.AuditPath, socket, Environment.UserName, time, ct)
             : AuditLog.OpenAsync(options.AuditPath, Environment.UserName, time, ct)).ConfigureAwait(false);
-        builder.Services.AddSingleton(audit);
+        // Registered by factory, so the container owns it and disposes it asynchronously.
+        builder.Services.AddSingleton(_ => audit);
         builder.Services.AddSingleton<SignInGate>();
         var store = new StoreFolder(options.StorePath);
         builder.Services.AddSingleton(store);
@@ -70,7 +71,7 @@ public static class ApiHost
         builder.Services.AddSingleton(new StoreQueries(index));
         builder.Services.AddSingleton<ToolRegistry>();
         var search = await SearchIndex.OpenAsync(options.SearchPath, ct).ConfigureAwait(false);
-        builder.Services.AddSingleton(search);
+        builder.Services.AddSingleton(_ => search);
         builder.Services.AddSingleton(new SearchRunner(index, search));
         builder.Services.AddHostedService<SearchIndexer>();
         builder.Services.AddSingleton<ChainMonitor>();
@@ -175,11 +176,10 @@ public static class ApiHost
         app.MapGet("/notices", () => File.Exists(options.NoticesPath)
             ? Results.File(options.NoticesPath, "text/plain; charset=utf-8")
             : Results.NotFound());
-        app.Lifetime.ApplicationStopped.Register(() =>
-        {
-            search.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            audit.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        });
+        // The container disposes only what it handed out: resolve both now, so the host's
+        // DisposeAsync closes them once the hosted services (the indexer) have stopped.
+        _ = app.Services.GetRequiredService<AuditLog>();
+        _ = app.Services.GetRequiredService<SearchIndex>();
         return app;
     }
 }

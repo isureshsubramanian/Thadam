@@ -248,7 +248,7 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
         }
         if (indexedText.Count > 0)
         {
-            var ids = candidates?.Where(s => s >= first && s <= last).ToList() ?? [];
+            var ids = candidates is null ? [] : Slice(candidates, first, last);
             var unindexed = last > indexedSeq;
             if (ids.Count == 0 && !unindexed)
             {
@@ -257,6 +257,8 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
             var parts = new List<string>();
             if (ids.Count > 0)
             {
+                // The page and summary queries share this one parameter; segment connections
+                // are query-only, so it cannot be loaded into a temporary table instead.
                 parts.Add($"seq IN (SELECT value FROM json_each({where.Param(Json(ids))}))");
             }
             if (unindexed)
@@ -330,6 +332,38 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
 
     private static string Json(List<long> ids) =>
         "[" + string.Join(',', ids.Select(i => i.ToString(CultureInfo.InvariantCulture))) + "]";
+
+    /// <summary>The candidates from <paramref name="first"/> to <paramref name="last"/>; <paramref name="newestFirst"/> is sorted descending.</summary>
+    private static List<long> Slice(IReadOnlyList<long> newestFirst, long first, long last)
+    {
+        var start = FirstAtOrBelow(newestFirst, last);
+        var end = FirstAtOrBelow(newestFirst, first - 1);
+        var ids = new List<long>(end - start);
+        for (var i = start; i < end; i++)
+        {
+            ids.Add(newestFirst[i]);
+        }
+        return ids;
+    }
+
+    /// <summary>The index of the first value at or below <paramref name="value"/> in a descending list.</summary>
+    private static int FirstAtOrBelow(IReadOnlyList<long> newestFirst, long value)
+    {
+        int lo = 0, hi = newestFirst.Count;
+        while (lo < hi)
+        {
+            var mid = lo + ((hi - lo) / 2);
+            if (newestFirst[mid] > value)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
 
     /// <summary>Conditions joined by AND, with their values as numbered parameters.</summary>
     private sealed class Where

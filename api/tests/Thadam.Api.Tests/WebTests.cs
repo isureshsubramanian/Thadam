@@ -1,4 +1,8 @@
 using System.Net;
+using Microsoft.Extensions.DependencyInjection;
+using Thadam.Api.Search;
+using Thadam.Audit;
+using Thadam.Store.Queries;
 using Thadam.Store.Tests;
 
 namespace Thadam.Api.Tests;
@@ -20,6 +24,18 @@ public sealed class WebTests(StoreFixture store)
         Assert.Contains("script-src 'self'", csp, StringComparison.Ordinal);
         Assert.Contains("frame-ancestors 'none'", csp, StringComparison.Ordinal);
         Assert.Equal("nosniff", r.Headers.GetValues("X-Content-Type-Options").Single());
+    }
+
+    [Fact]
+    public async Task StoppingTheHostClosesTheAuditLogAndSearchIndex()
+    {
+        var host = await ApiTestHost.StartAsync(store, Ct);
+        var audit = host.Services.GetRequiredService<AuditLog>();
+        var search = host.Services.GetRequiredService<SearchIndex>();
+        var segments = host.Services.GetRequiredService<SegmentIndex>();
+        await host.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => audit.ReviewedEventsAsync(Ct));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => search.TailAsync(segments, Ct));
     }
 
     [Fact]

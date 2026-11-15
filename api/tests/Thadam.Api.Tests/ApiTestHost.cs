@@ -38,6 +38,9 @@ public sealed class ApiTestHost : IAsyncDisposable
 
     public ApiOptions Options { get; }
 
+    /// <summary>The host's services, for tests that check what it owns.</summary>
+    public IServiceProvider Services => _app.Services;
+
     public Uri BaseAddress { get; }
 
     /// <summary>A client with its own cookies.</summary>

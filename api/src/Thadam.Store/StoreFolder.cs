@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Data.Sqlite;
 
 namespace Thadam.Store;
@@ -239,6 +240,7 @@ public sealed class StoreFolder
                 throw new StoreLayoutException(
                     $"{System.IO.Path.GetFileName(file)}: schema version {found}, expected {string.Join(" or ", versions)}");
             }
+            OpenedVersions.AddOrUpdate(conn, new StrongBox<int>(checked((int)found)));
             return conn;
         }
         catch
@@ -248,10 +250,17 @@ public sealed class StoreFolder
         }
     }
 
+    /// <summary>The version each connection opened here was checked against; dropped with the connection.</summary>
+    private static readonly ConditionalWeakTable<SqliteConnection, StrongBox<int>> OpenedVersions = new();
+
     /// <summary>The schema version of an open segment (2 or 3, as checked when it was opened).</summary>
     public static async Task<int> SegmentVersionAsync(SqliteConnection conn, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(conn);
+        if (OpenedVersions.TryGetValue(conn, out var opened))
+        {
+            return opened.Value;
+        }
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "PRAGMA user_version";
         return checked((int)(long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L));

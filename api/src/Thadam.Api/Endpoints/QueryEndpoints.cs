@@ -170,14 +170,8 @@ public static class QueryEndpoints
     {
         var ids = batch.EventIds ?? [];
         var action = reviewed ? AuditAction.FlagReviewed : AuditAction.FlagReopened;
-        var missing = new List<string>();
-        foreach (var id in ids)
-        {
-            if ((await d.Queries.FindEventAsync(id, ct).ConfigureAwait(false))?.Severity is null)
-            {
-                missing.Add(id);
-            }
-        }
+        var found = await d.Queries.FindEventsAsync(ids, ct).ConfigureAwait(false);
+        var missing = ids.Where(id => found.GetValueOrDefault(id)?.Severity is null).ToList();
         if (missing.Count > 0)
         {
             foreach (var id in missing)
