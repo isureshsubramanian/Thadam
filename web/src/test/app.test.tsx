@@ -337,17 +337,17 @@ describe("coverage and session labels", () => {
     expect((await screen.findByText("Watching")).className).toBe("pill ok");
   });
   it("shows union minutes, reason counts, and coverage wording", async () => {
-    fake.install(coverageRoute([gap("not_running", "stopped"), gap("not_running", "crashed"), gap("machine_off"), gap("before_start"), gap("dropped", "os", 2), gap("dropped", "network", 3), gap("paused", null, 9)]));
+    fake.install(coverageRoute([gap("not_running", "stopped"), gap("not_running", "crashed"), gap("machine_off"), gap("before_start"), gap("dropped", "os", 2), gap("dropped", "network", 3), gap("dropped", "agent", 4), gap("paused", null, 9)]));
     render(<App />);
     const pill = await screen.findByText("Not watching: 14 min");
     expect(pill.className).toBe("pill flag");
     expect(pill.title).toContain("not running: 2");
-    expect(await screen.findByText("Show 6 gaps")).toBeTruthy();
+    expect(await screen.findByText("Show 7 gaps")).toBeTruthy();
     const rows = screen.getAllByRole("row").map((r) => r.textContent);
-    for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off · Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "Writing paused: disk low (9 events not written)"]) {
+    for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off · Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "4 events dropped by the hook socket", "Writing paused: disk low (9 events not written)"]) {
       expect(rows.some((r) => r.includes(label)), label).toBe(true);
     }
-    expect(screen.getByText("Show 6 gaps")).toBeTruthy();
+    expect(screen.getByText("Show 7 gaps")).toBeTruthy();
   });
   it("groups a restart loop and a reboot into single timeline rows", () => {
     const at = (min: number, sec = 0) => new Date(Date.UTC(2026, 10, 15, 2, min, sec)).toISOString();

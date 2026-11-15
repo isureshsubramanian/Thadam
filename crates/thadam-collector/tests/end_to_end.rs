@@ -1370,7 +1370,9 @@ fn agent_messages_from_the_hook_become_rows_of_its_session() {
     assert!(!db_files_contain(&dir, "FORGED"));
     assert!(stderr.contains("agent_kept=3"), "{stderr}");
     if Path::new("/usr/bin/nc").exists() {
-        assert!(stderr.contains("agent_refused=1"), "{stderr}");
+        // Another program is closed at the socket, before its line is read (ADR-015 Decision 2).
+        assert!(stderr.contains("agent_rejected_not_hook=1"), "{stderr}");
+        assert!(stderr.contains("agent_refused=0"), "{stderr}");
     }
     // The hook's own run is kept, marked internal (hidden by default in the dashboard).
     let db = Store::open_read_only(only_segment(&store).unwrap()).unwrap();

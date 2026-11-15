@@ -5,9 +5,11 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::peer::peer_of;
+use crate::peer::{exe_of, peer_of};
 use garde::Validate;
 
 /// JSON overhead allowance is an estimate.
@@ -15,6 +17,9 @@ const MAX_LINE: usize = thadam_core::model::MAX_TARGET_INPUT + 64 * 1024;
 /// The hook sends one line; these connection budgets are estimates.
 const MAX_LINES: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections read at once (ADR-015 Decision 2; estimate: a few tools, each with short-lived
+/// hook calls). Over that, a new connection is closed unread.
+pub const MAX_CONNECTIONS: usize = 32;
 
 use thadam_core::AgentMessage;
 use time::OffsetDateTime;
@@ -36,6 +41,10 @@ pub enum AgentReject {
     Malformed,
     /// A valid message whose fields fail validation.
     Invalid,
+    /// Sent by a program other than the installed hook; closed before anything was read.
+    NotHook,
+    /// `MAX_CONNECTIONS` were already open; closed before anything was read.
+    Busy,
 }
 
 impl AgentReject {
@@ -45,6 +54,8 @@ impl AgentReject {
             AgentReject::TooLong => "too_long",
             AgentReject::Malformed => "malformed",
             AgentReject::Invalid => "invalid",
+            AgentReject::NotHook => "not_hook",
+            AgentReject::Busy => "busy",
         }
     }
 }
@@ -64,19 +75,30 @@ pub enum AgentItem {
 pub struct AgentListener {
     listener: UnixListener,
     path: PathBuf,
+    hook_bin: PathBuf,
 }
 
 impl AgentListener {
-    pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
+    /// Binds the socket. `hook_bin` is the only program whose messages are read (ADR-015
+    /// Decision 2); it is compared as the kernel reports the sender's executable.
+    pub fn bind(path: impl AsRef<Path>, hook_bin: &Path) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let listener = bind_owned_socket(&path, "agent socket")?;
-        Ok(Self { listener, path })
+        let hook_bin = hook_bin
+            .canonicalize()
+            .unwrap_or_else(|_| hook_bin.to_path_buf());
+        Ok(Self {
+            listener,
+            path,
+            hook_bin,
+        })
     }
 
     pub fn serve<F>(self, send: F)
     where
         F: Fn(AgentItem) -> bool + Clone + Send + 'static,
     {
+        let open = Arc::new(AtomicUsize::new(0));
         for stream in self.listener.incoming() {
             let Ok(stream) = stream else { continue };
             // ORDERING (the other side is `thadam_hook::send`): the sender's identity is read
@@ -91,8 +113,27 @@ impl AgentListener {
                     continue;
                 }
             };
+            // Checked before a thread starts or a byte is read, so neither another program nor
+            // a flood of connections costs more than this check. Closed unanswered.
+            let refused = if !exe_of(peer.pid).is_ok_and(|exe| exe == self.hook_bin) {
+                Some(AgentReject::NotHook)
+            } else if open.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+                open.fetch_sub(1, Ordering::AcqRel);
+                Some(AgentReject::Busy)
+            } else {
+                None
+            };
+            if let Some(reason) = refused {
+                drop(stream);
+                if !send(AgentItem::Rejected(reason)) {
+                    return;
+                }
+                continue;
+            }
             let send = send.clone();
+            let open = Arc::clone(&open);
             std::thread::spawn(move || {
+                let _slot = Slot(open);
                 // ORDERING: the read timeout is set before the acknowledgement, while the
                 // sender is still waiting for it. The sender closes as soon as it has the
                 // acknowledgement, and macOS refuses socket options on a connection its peer
@@ -107,6 +148,15 @@ impl AgentListener {
                 }
             });
         }
+    }
+}
+
+/// One of `MAX_CONNECTIONS`, given back when its thread ends however it ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -257,6 +307,11 @@ mod tests {
     use std::io::{Read, Write};
     use std::sync::mpsc;
 
+    /// The test binary stands in for the hook.
+    fn me() -> PathBuf {
+        std::env::current_exe().unwrap()
+    }
+
     fn folder() -> PathBuf {
         std::env::temp_dir().join(format!("ta-{:08x}", uuid::Uuid::now_v7().as_u128() as u32))
     }
@@ -265,14 +320,14 @@ mod tests {
     fn bind_permissions_and_cleanup() {
         let dir = folder();
         let path = dir.join("agent.sock");
-        let listener = AgentListener::bind(&path).unwrap();
+        let listener = AgentListener::bind(&path, &me()).unwrap();
         assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o755);
         assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o666);
         drop(listener);
         assert!(!path.exists());
         let stale = UnixListener::bind(&path).unwrap();
         drop(stale);
-        drop(AgentListener::bind(&path).unwrap());
+        drop(AgentListener::bind(&path, &me()).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -283,13 +338,13 @@ mod tests {
         let path = dir.join("agent.sock");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o775)).unwrap();
         assert_eq!(
-            AgentListener::bind(&path).unwrap_err().kind(),
+            AgentListener::bind(&path, &me()).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(&path, b"keep").unwrap();
         assert_eq!(
-            AgentListener::bind(&path).unwrap_err().kind(),
+            AgentListener::bind(&path, &me()).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read(&path).unwrap(), b"keep");
@@ -301,7 +356,7 @@ mod tests {
     fn messages_and_rejections() {
         let dir = folder();
         let path = dir.join("agent.sock");
-        let listener = AgentListener::bind(&path).unwrap();
+        let listener = AgentListener::bind(&path, &me()).unwrap();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || listener.serve(move |item| tx.send(item).is_ok()));
         let message =
@@ -352,6 +407,64 @@ mod tests {
                 .unwrap_or_else(|e| panic!("no item for the {reason:?} case: {e}"));
             assert_eq!(got, AgentItem::Rejected(reason));
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn another_program_is_closed_unread() {
+        let dir = folder();
+        let path = dir.join("agent.sock");
+        let listener = AgentListener::bind(&path, Path::new("/usr/bin/true")).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || listener.serve(move |item| tx.send(item).is_ok()));
+        let message =
+            AgentMessage::new("tool-a", thadam_core::agent::AgentKind::Prompt, "session-1");
+        let mut client = UnixStream::connect(&path).unwrap();
+        // Before the collector can close it: macOS refuses options on a closed connection.
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let _ = writeln!(client, "{}", serde_json::to_string(&message).unwrap());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AgentItem::Rejected(AgentReject::NotHook)
+        );
+        // No acknowledgement: the connection is closed.
+        assert!(matches!(client.read(&mut [0]), Ok(0) | Err(_)));
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_connection_over_the_limit_is_closed() {
+        let dir = folder();
+        let path = dir.join("agent.sock");
+        let listener = AgentListener::bind(&path, &me()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || listener.serve(move |item| tx.send(item).is_ok()));
+        // Each held open and silent, so each keeps its slot until its read times out.
+        let mut held: Vec<UnixStream> = (0..MAX_CONNECTIONS)
+            .map(|_| {
+                let mut c = UnixStream::connect(&path).unwrap();
+                wait_ack(&mut c);
+                c
+            })
+            .collect();
+        let mut over = UnixStream::connect(&path).unwrap();
+        over.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AgentItem::Rejected(AgentReject::Busy)
+        );
+        assert!(matches!(over.read(&mut [0]), Ok(0) | Err(_)));
+        // A slot given back is free again.
+        drop(held.pop());
+        std::thread::sleep(Duration::from_millis(100));
+        let mut again = UnixStream::connect(&path).unwrap();
+        wait_ack(&mut again);
+        drop(held);
         fs::remove_dir_all(dir).unwrap();
     }
 

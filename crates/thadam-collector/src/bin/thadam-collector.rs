@@ -221,7 +221,8 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     }
     let source = o.source.as_deref().unwrap_or("eslogger");
     let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
-    let agents = open_agent_socket(o.agent_socket.as_deref(), source)?;
+    let hook = Path::new(o.hook_bin.as_deref().unwrap_or(thadam_core::HOOK_BIN));
+    let agents = open_agent_socket(o.agent_socket.as_deref(), source, hook)?;
     if let Some(listener) = open_audit_socket(&o, source)? {
         // Not joined, as the other listeners: it waits in accept for as long as the process runs.
         std::thread::spawn(move || listener.serve());
@@ -447,13 +448,17 @@ fn open_flow_socket(arg: Option<&str>, source: &str) -> Result<Option<FlowListen
 }
 
 /// The agent socket (ADR-011), on the same terms as the flow socket.
-fn open_agent_socket(arg: Option<&str>, source: &str) -> Result<Option<AgentListener>, Failure> {
+fn open_agent_socket(
+    arg: Option<&str>,
+    source: &str,
+    hook: &Path,
+) -> Result<Option<AgentListener>, Failure> {
     match (arg, source) {
         (Some("off"), _) | (None, "stdin") => Ok(None),
-        (Some(path), _) => AgentListener::bind(path)
+        (Some(path), _) => AgentListener::bind(path, hook)
             .map(Some)
             .map_err(|e| Failure::Usage(format!("cannot listen for agent messages: {e}"))),
-        (None, _) => match AgentListener::bind(thadam_core::AGENT_SOCKET) {
+        (None, _) => match AgentListener::bind(thadam_core::AGENT_SOCKET, hook) {
             Ok(l) => Ok(Some(l)),
             Err(e) => {
                 diag!("thadam-collector: agent messages not recorded, cannot listen: {e}");

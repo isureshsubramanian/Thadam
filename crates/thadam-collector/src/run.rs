@@ -16,6 +16,10 @@
 //! The writer thread also keeps the heartbeat and, once a minute, records a `dropped` gap per
 //! source that lost events in that minute (ADR-013 Decision 1). The pipeline thread publishes
 //! its loss counters for it (`Lost`).
+//!
+//! Agent items, which any tool can produce at will, may hold at most `AGENT_SLOTS` of the
+//! item buffer (ADR-015 Decision 2). Beyond that they are dropped and recorded as a `dropped`
+//! gap with detail `agent`, so a flood of hook messages cannot hold up OS events.
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -44,6 +48,8 @@ pub const LOGGER_EVENTS: &[&str] = &[
 /// Items buffered between reader and pipeline. About 50 s at the 1,330 events/s average
 /// measured in Phase 0, enough to cover the start-up snapshot (estimate: under 1 s).
 const ITEM_BUFFER: usize = 65_536;
+/// Of `ITEM_BUFFER`, how many agent items may wait at once (ADR-015 Decision 2; estimate).
+const AGENT_SLOTS: usize = 2_048;
 /// Records buffered for the writer (estimate, ADR-003 Decision 8).
 const RECORD_BUFFER: usize = 10_000;
 /// How long to keep draining after a stop request before giving up on the source.
@@ -139,6 +145,7 @@ where
 {
     let redactor = Redactor::with_default_detectors()?;
     let (item_tx, item_rx) = sync_channel::<Input>(ITEM_BUFFER);
+    let lost = Arc::new(Lost::default());
     if let Some(listener) = flows {
         pipeline.enable_network();
         let tx = item_tx.clone();
@@ -148,8 +155,11 @@ where
     if let Some(listener) = agents {
         pipeline.enable_agent();
         let tx = item_tx.clone();
+        let lost = Arc::clone(&lost);
         // Not joined, as the flow listener.
-        std::thread::spawn(move || listener.serve(move |item| tx.send(Input::Agent(item)).is_ok()));
+        std::thread::spawn(move || {
+            listener.serve(move |item| !lost.admit_agent() || tx.send(Input::Agent(item)).is_ok())
+        });
     }
     let backlog = Arc::new(Backlog::default());
     // Not joined: a reader blocked on a quiet input must not hold up shutdown.
@@ -162,7 +172,6 @@ where
     // Shared so progress lines show rows written so far, not only the total at the end.
     let written = Arc::new(AtomicU64::new(0));
     let status = Arc::new(Mutex::new(store.status()));
-    let lost = Arc::new(Lost::default());
     let writer = {
         let written = Arc::clone(&written);
         let status = Arc::clone(&status);
@@ -253,6 +262,23 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>, backlog: &Bac
 struct Lost {
     os: AtomicU64,
     net: AtomicU64,
+    /// Agent items dropped over `AGENT_SLOTS`, counted by the agent listener.
+    agent: AtomicU64,
+    /// Agent items waiting in the item buffer.
+    agent_queued: AtomicUsize,
+}
+
+impl Lost {
+    /// Takes one of `AGENT_SLOTS` for an agent item, or counts it dropped when none is free.
+    /// The pipeline thread gives the slot back as it takes the item (`process`).
+    fn admit_agent(&self) -> bool {
+        if self.agent_queued.fetch_add(1, Ordering::AcqRel) < AGENT_SLOTS {
+            return true;
+        }
+        self.agent_queued.fetch_sub(1, Ordering::AcqRel);
+        self.agent.fetch_add(1, Ordering::Relaxed);
+        false
+    }
 }
 
 /// What the writer has already recorded of `Lost`, and since when.
@@ -260,6 +286,7 @@ struct Recorded {
     since_us: i64,
     os: u64,
     net: u64,
+    agent: u64,
 }
 
 impl Recorded {
@@ -268,9 +295,16 @@ impl Recorded {
         let now = now_us();
         let os = lost.os.load(Ordering::Relaxed);
         let net = lost.net.load(Ordering::Relaxed);
+        let agent = lost.agent.load(Ordering::Relaxed);
         for gap in [
             coverage::dropped(self.since_us, now, "os", os.saturating_sub(self.os)),
             coverage::dropped(self.since_us, now, "network", net.saturating_sub(self.net)),
+            coverage::dropped(
+                self.since_us,
+                now,
+                "agent",
+                agent.saturating_sub(self.agent),
+            ),
         ]
         .into_iter()
         .flatten()
@@ -281,6 +315,7 @@ impl Recorded {
             since_us: now,
             os,
             net,
+            agent,
         };
         Ok(())
     }
@@ -319,6 +354,7 @@ fn write_all(
         since_us: now_us(),
         os: 0,
         net: 0,
+        agent: 0,
     };
     store.maintain(now_us())?;
     publish(&store);
@@ -439,6 +475,7 @@ fn process(
                 progress.publish_lost(&pipeline.stats);
             }
             Ok(Input::Agent(item)) => {
+                progress.lost.agent_queued.fetch_sub(1, Ordering::AcqRel);
                 send(pipeline.handle_agent(item), pipeline, redactor, records)?;
             }
             Ok(Input::Os(Err(e))) => {
@@ -475,4 +512,25 @@ fn send(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_items_over_their_slots_are_counted_dropped() {
+        let lost = Lost::default();
+        assert!((0..AGENT_SLOTS).all(|_| lost.admit_agent()));
+        assert!(!lost.admit_agent());
+        assert!(!lost.admit_agent());
+        assert_eq!(lost.agent.load(Ordering::Relaxed), 2);
+        assert_eq!(lost.agent_queued.load(Ordering::Relaxed), AGENT_SLOTS);
+        // The pipeline takes one: one more fits.
+        lost.agent_queued.fetch_sub(1, Ordering::AcqRel);
+        assert!(lost.admit_agent());
+        assert_eq!(lost.agent.load(Ordering::Relaxed), 2);
+        let gap = coverage::dropped(0, 1, "agent", 2).unwrap();
+        assert_eq!((gap.detail, gap.missed), (Some("agent"), Some(2)));
+    }
 }

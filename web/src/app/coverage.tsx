@@ -9,7 +9,7 @@ export function gapWords(g: Gap): string {
     case "not_running": return `Thadam not running${g.detail ? ` (${g.detail})` : ""}`;
     case "machine_off": return "Mac off";
     case "before_start": return "Starting after boot";
-    case "dropped": return `${num(g.missed ?? 0)} events dropped by ${g.detail === "network" ? "the network extension" : "macOS"}`;
+    case "dropped": return `${num(g.missed ?? 0)} events dropped by ${g.detail === "network" ? "the network extension" : g.detail === "agent" ? "the hook socket" : "macOS"}`;
     case "paused": return `Writing paused: disk low (${num(g.missed ?? 0)} events not written)`;
     default: return words(g.reason);
   }
