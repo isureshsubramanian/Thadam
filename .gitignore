@@ -5,6 +5,7 @@
 !/LICENSE
 !/README.md
 !/SECURITY.md
+!/.github/
 !/Cargo.toml
 !/Cargo.lock
 !/rust-toolchain.toml

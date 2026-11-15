@@ -9,6 +9,13 @@ deleted row is detected. Thadam observes only: it never blocks a tool.
 
 Status: early development (0.1.x). Apple silicon Macs only.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/screenshots/overview-dark.png">
+  <img alt="The Thadam dashboard overview: activity per AI tool, a coverage timeline with gaps, folders reached outside the project, and the hosts each tool connected to." src=".github/screenshots/overview-light.png">
+</picture>
+
+<sub>The overview page, shown with made-up data.</sub>
+
 ## What it records
 
 - **Files**: opens, writes, renames and deletes by an AI tool or anything it started.
