@@ -13,6 +13,9 @@ import { Empty, Loading, PageHead } from "../app/ui";
 import { usePaged } from "../app/usePaged";
 
 
+/** Session ids are time-ordered, so neighbours share their start; the random tail tells them apart. The full id is in the link's title. */
+const shortId = (id: string): string => (id.length > 12 ? `…${id.slice(-12)}` : id);
+
 const projectName = (p: string | null): string => (p === null ? "no project" : (p.split("/").filter(Boolean).at(-1) ?? p));
 
 function SessionList({ range }: { range: TimeRange }) {
@@ -29,8 +32,8 @@ function SessionList({ range }: { range: TimeRange }) {
             <tbody>
               {page.items?.map((s) => (
                 <tr key={s.sessionId}>
-                  <td><a className="mono" href={href({ view: "sessions", sessionId: s.sessionId })}>{s.sessionId}</a>{s.parentSessionId !== null && <span className="muted"> · delegated</span>}</td>
-                  <td>{s.displayName} {s.prompts === 0 && <OsOnly />}</td>
+                  <td><a className="mono" href={href({ view: "sessions", sessionId: s.sessionId })} title={s.sessionId} aria-label={`Session ${s.sessionId}`}>{shortId(s.sessionId)}</a>{s.parentSessionId !== null && <span className="muted"> · delegated</span>}</td>
+                  <td>{s.displayName} {s.prompts === 0 && <OsOnly short />}</td>
                   <td>{projectName(s.project)}</td>
                   <td title={utc(s.last)}>{when(s.last)}</td>
                   <td className="num">{num(s.rows)}</td>

@@ -151,6 +151,7 @@ export function TimelineCoverage({ range }: { range: TimeRange }) {
   return <div role="status" className="card pad">{gaps.slice(0, 5).map((g, i) => <p key={i}>Thadam was not watching {when(g.from)} to {when(g.to)} ({gapWords(g)}): activity in that window is missing.</p>)}{gaps.length > 5 && <p>and {num(gaps.length - 5)} more</p>}</div>;
 }
 
-export function OsOnly() {
-  return <span className="pill" title="The tool's hooks sent no prompts for this session: it started before the hooks were installed, the tool has no hooks, or no prompt was typed.">OS only: no prompts recorded</span>;
+/** `short` is for list rows, where the long label would push columns out of the card. */
+export function OsOnly({ short = false }: { short?: boolean }) {
+  return <span className="pill" title="The tool's hooks sent no prompts for this session: it started before the hooks were installed, the tool has no hooks, or no prompt was typed.">{short ? "OS only" : "OS only: no prompts recorded"}</span>;
 }

@@ -236,7 +236,7 @@ describe("coverage and session labels", () => {
     });
     window.location.hash = "#/sessions";
     render(<App />);
-    expect((await screen.findByText("OS only: no prompts recorded")).title).toBe("The tool's hooks sent no prompts for this session: it started before the hooks were installed, the tool has no hooks, or no prompt was typed.");
+    expect((await screen.findByText("OS only")).title).toBe("The tool's hooks sent no prompts for this session: it started before the hooks were installed, the tool has no hooks, or no prompt was typed.");
     act(() => { window.location.hash = "#/sessions/s-b1"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
     expect(await screen.findByText("and 2 more")).toBeTruthy();
     expect(screen.getAllByText(/activity in that window is missing/)).toHaveLength(5);
