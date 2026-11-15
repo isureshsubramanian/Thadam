@@ -3,6 +3,10 @@
   <PropertyGroup>
     <AssemblyName>thadam-api</AssemblyName>
     <RootNamespace>Thadam.Api</RootNamespace>
+    <!-- The collector trusts this program by its path, and its entitlements allow libraries
+         signed by others (the .NET runtime), so DOTNET_STARTUP_HOOKS must not be able to load
+         foreign code into it. -->
+    <StartupHookSupport>false</StartupHookSupport>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="FluentValidation" />
