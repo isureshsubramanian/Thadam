@@ -92,8 +92,10 @@ if [[ "$network" == 1 ]]; then
     <key>signingStyle</key><string>automatic</string>
 </dict></plist>
 PLIST
+    # Lets Xcode fetch the Developer ID provisioning profiles for the signed-in account.
     xcodebuild -quiet -exportArchive -archivePath "$stage/ThadamNet.xcarchive" \
-        -exportOptionsPlist "$stage/export.plist" -exportPath "$stage/export"
+        -exportOptionsPlist "$stage/export.plist" -exportPath "$stage/export" \
+        -allowProvisioningUpdates
     mkdir -p "$root/Applications"
     ditto "$stage/export/ThadamNet.app" "$root/Applications/ThadamNet.app"
 fi
