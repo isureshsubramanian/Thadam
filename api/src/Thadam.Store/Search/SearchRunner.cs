@@ -41,9 +41,11 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
     public const int CandidateCap = 100_000;
     private const int MaxFolders = 100;
 
-    public async Task<SearchResult> RunAsync(SearchQuery q, long? afterSeq, CancellationToken ct)
+    public async Task<SearchResult> RunAsync(SearchQuery q, long? afterSeq, int limit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(q);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, StoreQueries.MaxPageSize);
         var below = afterSeq ?? long.MaxValue;
         var spans = q.Range is { } range
             ? await segments.OverlappingAsync(range, ct).ConfigureAwait(false)
@@ -79,24 +81,24 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
                 continue; // no candidates in this segment and nothing unindexed
             }
             await using var conn = await segments.OpenAsync(span, ct).ConfigureAwait(false);
-            if (rows.Count <= StoreQueries.PageSize)
+            if (rows.Count <= limit)
             {
-                await ReadPageAsync(conn, where, below, rows, ct).ConfigureAwait(false);
+                await ReadPageAsync(conn, where, below, limit, rows, ct).ConfigureAwait(false);
             }
             if (acc is not null)
             {
                 await acc.AddAsync(conn, where, ct).ConfigureAwait(false);
             }
-            else if (rows.Count > StoreQueries.PageSize)
+            else if (rows.Count > limit)
             {
                 break;
             }
         }
 
-        long? next = rows.Count > StoreQueries.PageSize
-            ? rows[StoreQueries.PageSize - 1].Seq
+        long? next = rows.Count > limit
+            ? rows[limit - 1].Seq
             : capped ? floor : null;
-        var page = new Page<EventView>(rows.Count > StoreQueries.PageSize ? rows[..StoreQueries.PageSize] : rows, next);
+        var page = new Page<EventView>(rows.Count > limit ? rows[..limit] : rows, next);
         var hosts = acc is null ? null : await HostsAsync(q, spans, ct).ConfigureAwait(false);
         return new SearchResult(page, acc?.Build(), hosts, capped);
     }
@@ -219,12 +221,12 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
             .Select(h => h.Value.ToStats(h.Key.Item1, h.Key.Item2))];
     }
 
-    private static async Task ReadPageAsync(SqliteConnection conn, Where where, long below, List<EventView> rows, CancellationToken ct)
+    private static async Task ReadPageAsync(SqliteConnection conn, Where where, long below, int limit, List<EventView> rows, CancellationToken ct)
     {
         await using var cmd = where.Command(conn,
             $"SELECT {StoreQueries.Columns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false))} FROM events WHERE {{where}} AND seq < $below ORDER BY seq DESC LIMIT $limit");
         cmd.Parameters.AddWithValue("$below", below);
-        cmd.Parameters.AddWithValue("$limit", StoreQueries.PageSize + 1 - rows.Count);
+        cmd.Parameters.AddWithValue("$limit", limit + 1 - rows.Count);
         await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         while (await r.ReadAsync(ct).ConfigureAwait(false))
         {

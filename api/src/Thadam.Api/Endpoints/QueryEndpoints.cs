@@ -18,6 +18,10 @@ public static class QueryEndpoints
             ReviewAsync(eventId, true, d, ct)).RequireAuthorization().RequireCsrf();
         api.MapPost("/flags/{eventId}/reopen", (string eventId, [AsParameters] Deps d, CancellationToken ct) =>
             ReviewAsync(eventId, false, d, ct)).RequireAuthorization().RequireCsrf();
+        api.MapPost("/flags/review", (ReviewBatch batch, [AsParameters] Deps d, CancellationToken ct) =>
+            ReviewManyAsync(batch, true, d, ct)).RequireAuthorization().RequireCsrf().Validate<ReviewBatch, ReviewBatchValidator>();
+        api.MapPost("/flags/reopen", (ReviewBatch batch, [AsParameters] Deps d, CancellationToken ct) =>
+            ReviewManyAsync(batch, false, d, ct)).RequireAuthorization().RequireCsrf().Validate<ReviewBatch, ReviewBatchValidator>();
         api.MapGet("/sessions", SessionsAsync).RequireAuthorization();
         api.MapGet("/sessions/{sessionId}", TimelineAsync).RequireAuthorization();
     }
@@ -88,14 +92,20 @@ public static class QueryEndpoints
         var all = await d.Queries.FlagItemsAsync(new Filter(range, args.Tool), reviewed, ct).ConfigureAwait(false);
         var wantReviewed = args.Status == "reviewed";
         var after = Args.After(args.After);
-        var matching = all
+        var limit = Args.Limit(args.Limit);
+        var filter = Args.Filter(args.Q);
+        var name = await d.NamesAsync(ct).ConfigureAwait(false);
+        var listed = all
             .Where(i => i.Reviewed == wantReviewed)
             .Where(i => args.Severity is null || SeverityRule.WireName(i.Severity) == args.Severity)
-            .Where(i => after is null || i.LastSeq < after)
-            .Take(StoreQueries.PageSize + 1)
+            .Where(i => filter is null || Args.Matches(filter, i.Target, i.SessionId, i.Tool, name(i.Tool), i.Rule))
             .ToList();
-        var name = await d.NamesAsync(ct).ConfigureAwait(false);
-        var page = matching.Take(StoreQueries.PageSize).ToList();
+        if (filter is not null)
+        {
+            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+        }
+        var matching = listed.Where(i => after is null || i.LastSeq < after).Take(limit + 1).ToList();
+        var page = matching.Take(limit).ToList();
         return Results.Json(new
         {
             range = Range(range),
@@ -114,7 +124,9 @@ public static class QueryEndpoints
                 last = Values.Time(i.LastTsUs),
                 reviewed = i.Reviewed,
             }),
-            next = matching.Count > StoreQueries.PageSize ? page[^1].LastSeq : (long?)null,
+            next = matching.Count > limit ? page[^1].LastSeq : (long?)null,
+            total = (long?)listed.Count,
+            totalCapped = false,
         });
     }
 
@@ -139,6 +151,36 @@ public static class QueryEndpoints
         return Results.NoContent();
     }
 
+    /// <summary>
+    /// Marks up to one page of flags reviewed, or reopens them (ADR-014 Decision 5). Every id is
+    /// checked before anything is written: one unknown or unflagged id fails the whole request
+    /// (404, each failing id audited as failed). Each change is its own audit entry, as with
+    /// single reviews; ids already in the wanted state write nothing.
+    /// </summary>
+    private static async Task<IResult> ReviewManyAsync(ReviewBatch batch, bool reviewed, Deps d, CancellationToken ct)
+    {
+        var ids = batch.EventIds ?? [];
+        var action = reviewed ? AuditAction.FlagReviewed : AuditAction.FlagReopened;
+        var missing = new List<string>();
+        foreach (var id in ids)
+        {
+            if ((await d.Queries.FindEventAsync(id, ct).ConfigureAwait(false))?.Severity is null)
+            {
+                missing.Add(id);
+            }
+        }
+        if (missing.Count > 0)
+        {
+            foreach (var id in missing)
+            {
+                await d.Audit.AppendAsync(action, id, AuditOutcome.Failed, ct).ConfigureAwait(false);
+            }
+            return Results.NotFound();
+        }
+        var changed = await d.Audit.SetReviewedManyAsync(ids, reviewed, ct).ConfigureAwait(false);
+        return Results.Json(new { changed });
+    }
+
     private static async Task<IResult> SessionsAsync([AsParameters] SessionArgs args, [AsParameters] Deps d, CancellationToken ct)
     {
         var tools = await d.ToolKeysAsync(ct).ConfigureAwait(false);
@@ -148,17 +190,25 @@ public static class QueryEndpoints
         }
         var range = Args.Range(args.From, args.To, d.Time);
         var after = Args.After(args.After);
-        var matching = (await d.Queries.SessionsAsync(new Filter(range, args.Tool), ct).ConfigureAwait(false))
-            .Where(s => after is null || s.LastSeq < after)
-            .Take(StoreQueries.PageSize + 1)
-            .ToList();
+        var limit = Args.Limit(args.Limit);
+        var filter = Args.Filter(args.Q);
         var name = await d.NamesAsync(ct).ConfigureAwait(false);
-        var page = matching.Take(StoreQueries.PageSize).ToList();
+        var listed = (await d.Queries.SessionsAsync(new Filter(range, args.Tool), ct).ConfigureAwait(false))
+            .Where(s => filter is null || Args.Matches(filter, s.SessionId, s.Tool, name(s.Tool), s.Project))
+            .ToList();
+        if (filter is not null)
+        {
+            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+        }
+        var matching = listed.Where(s => after is null || s.LastSeq < after).Take(limit + 1).ToList();
+        var page = matching.Take(limit).ToList();
         return Results.Json(new
         {
             range = Range(range),
             items = page.Select(s => Session(s, name)),
-            next = matching.Count > StoreQueries.PageSize ? page[^1].LastSeq : (long?)null,
+            next = matching.Count > limit ? page[^1].LastSeq : (long?)null,
+            total = (long?)listed.Count,
+            totalCapped = false,
         });
     }
 
@@ -178,8 +228,14 @@ public static class QueryEndpoints
         {
             return Results.NotFound();
         }
-        var page = await d.Queries.TimelineAsync(
-            [.. tree.Select(s => s.SessionId)], args.Internal == "true", Args.After(args.After) ?? 0, ct).ConfigureAwait(false);
+        IReadOnlyList<string> ids = [.. tree.Select(s => s.SessionId)];
+        var includeInternal = args.Internal == "true";
+        var after = Args.After(args.After);
+        var page = await d.Queries.TimelineAsync(ids, includeInternal, after ?? 0, Args.Limit(args.Limit), ct).ConfigureAwait(false);
+        // Counted on the first page only; later pages keep the first page's total.
+        long? total = after is null
+            ? await d.Queries.TimelineCountAsync(ids, includeInternal, long.MaxValue, ct).ConfigureAwait(false)
+            : null;
         var name = await d.NamesAsync(ct).ConfigureAwait(false);
         return Results.Json(new
         {
@@ -187,6 +243,8 @@ public static class QueryEndpoints
             children = tree.Skip(1).Select(s => Session(s, name)),
             events = page.Items.Select(e => Event(e, name)),
             next = page.Next,
+            total,
+            totalCapped = false,
         });
     }
 

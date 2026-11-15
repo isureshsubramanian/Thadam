@@ -172,6 +172,129 @@ public sealed class QueryTests(StoreFixture store)
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
+    private static async Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string? csrf, string url, object body)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json"),
+        };
+        if (csrf is not null)
+        {
+            req.Headers.Add(ApiHost.CsrfHeader, csrf);
+        }
+        return await client.SendAsync(req, Ct);
+    }
+
+    [Fact]
+    public async Task PagesHonourTheLimitAndCarryTheTotal()
+    {
+        await using var host = await ApiTestHost.StartAsync(store, Ct);
+        var (client, _) = await host.SignedInAsync(Ct);
+
+        var first = await GetAsync(client, $"/api/v1/sessions?{All}&limit=2");
+        Assert.Equal(["s-c1", "s-b2"], Names(first.GetProperty("items"), "sessionId"));
+        Assert.Equal((3, false), (first.GetProperty("total").GetInt64(), first.GetProperty("totalCapped").GetBoolean()));
+        var second = await GetAsync(client, $"/api/v1/sessions?{All}&limit=2&after={first.GetProperty("next").GetInt64()}");
+        Assert.Equal(["s-b1"], Names(second.GetProperty("items"), "sessionId"));
+        Assert.Equal(JsonValueKind.Null, second.GetProperty("next").ValueKind);
+
+        var flags = await GetAsync(client, $"/api/v1/flags?{All}&limit=1");
+        Assert.Equal(1, flags.GetProperty("items").GetArrayLength());
+        Assert.Equal(5, flags.GetProperty("total").GetInt64());
+
+        // The timeline counts on its first page only; later pages keep that total.
+        var t1 = await GetAsync(client, "/api/v1/sessions/s-c1?limit=10");
+        Assert.Equal((10, 23L), (t1.GetProperty("events").GetArrayLength(), t1.GetProperty("total").GetInt64()));
+        var t2 = await GetAsync(client, $"/api/v1/sessions/s-c1?limit=10&after={t1.GetProperty("next").GetInt64()}");
+        Assert.Equal(10, t2.GetProperty("events").GetArrayLength());
+        Assert.Equal(JsonValueKind.Null, t2.GetProperty("total").ValueKind);
+        Assert.Equal(24, (await GetAsync(client, "/api/v1/sessions/s-c1?internal=true")).GetProperty("total").GetInt64());
+
+        var search = await GetAsync(client, "/api/v1/events?q=session:s-b1&limit=2");
+        Assert.Equal(2, search.GetProperty("items").GetArrayLength());
+        Assert.Equal(3, search.GetProperty("total").GetInt64());
+        Assert.False(search.GetProperty("totalCapped").GetBoolean());
+    }
+
+    [Fact]
+    public async Task GridFiltersMatchAnyColumnAndAreAuditedWithoutTheText()
+    {
+        await using var host = await ApiTestHost.StartAsync(store, Ct);
+        var (client, _) = await host.SignedInAsync(Ct);
+        var audit = host.Service<Thadam.Audit.AuditLog>();
+        var before = (await audit.EntriesAsync(Ct)).Count(e => e.Action == "search");
+
+        Assert.Equal(["s-b2", "s-b1"], Names((await GetAsync(client, $"/api/v1/sessions?{All}&q=S-B")).GetProperty("items"), "sessionId"));
+        Assert.Equal(["s-c1", "s-b2", "s-b1"], Names((await GetAsync(client, $"/api/v1/sessions?{All}&q=%20")).GetProperty("items"), "sessionId"));
+        var flags = await GetAsync(client, $"/api/v1/flags?{All}&q=203.0.113.7");
+        Assert.Equal(["unknown_host"], Names(flags.GetProperty("items"), "rule"));
+        Assert.Equal(1, flags.GetProperty("total").GetInt64());
+
+        var searches = (await audit.EntriesAsync(Ct)).Where(e => e.Action == "search").ToList();
+        Assert.Equal(before + 2, searches.Count); // the blank filter is no filter, so no search
+        Assert.All(searches, e => Assert.Equal("", e.TargetId));
+    }
+
+    [Fact]
+    public async Task BulkReviewMarksEveryFlagOrNone()
+    {
+        await using var host = await ApiTestHost.StartAsync(store, Ct);
+        var (client, csrf) = await host.SignedInAsync(Ct);
+        var open = Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId");
+        var two = open[..2];
+
+        var plain = (await GetAsync(client, "/api/v1/sessions/s-c1")).GetProperty("events")[0].GetProperty("eventId").GetString()!;
+        using (var r = await PostJsonAsync(client, csrf, "/api/v1/flags/review", new { eventIds = new[] { two[0], plain } }))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, r.StatusCode);
+        }
+        Assert.Equal(open, Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId"));
+
+        using (var r = await PostJsonAsync(client, csrf, "/api/v1/flags/review", new { eventIds = two }))
+        {
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            Assert.Equal(2, JsonElement.Parse(await r.Content.ReadAsStringAsync(Ct)).GetProperty("changed").GetInt32());
+        }
+        Assert.Equal(open[2..], Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId"));
+        Assert.Equal(two.Order(StringComparer.Ordinal), Names((await GetAsync(client, $"/api/v1/flags?{All}&status=reviewed")).GetProperty("items"), "eventId").Order(StringComparer.Ordinal));
+
+        using (var r = await PostJsonAsync(client, csrf, "/api/v1/flags/reopen", new { eventIds = two }))
+        {
+            Assert.Equal(2, JsonElement.Parse(await r.Content.ReadAsStringAsync(Ct)).GetProperty("changed").GetInt32());
+        }
+        Assert.Equal(open, Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId"));
+
+        var audit = host.Service<Thadam.Audit.AuditLog>();
+        var entries = await audit.EntriesAsync(Ct);
+        Assert.Equal(["flag_reviewed", "flag_reopened"], entries.Where(e => e.TargetId == two[1]).Select(e => e.Action));
+        Assert.Equal(["flag_reviewed"], entries.Where(e => e.TargetId == plain).Select(e => e.Action));
+        Assert.Equal(["failed"], entries.Where(e => e.TargetId == plain).Select(e => e.Outcome));
+        Assert.True((await audit.VerifyAsync(Ct)).Ok);
+    }
+
+    [Fact]
+    public async Task BulkReviewChecksTheListAndTheToken()
+    {
+        await using var host = await ApiTestHost.StartAsync(store, Ct);
+        var (client, csrf) = await host.SignedInAsync(Ct);
+        var id = Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId")[0];
+        foreach (var body in new object[]
+        {
+            new { eventIds = Array.Empty<string>() },
+            new { eventIds = new[] { id, id } },
+            new { eventIds = Enumerable.Range(0, 51).Select(i => $"e-{i}").ToArray() },
+            new { eventIds = new[] { "bad id" } },
+            new { other = 1 },
+        })
+        {
+            using var r = await PostJsonAsync(client, csrf, "/api/v1/flags/review", body);
+            Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+        }
+        using var noToken = await PostJsonAsync(client, null, "/api/v1/flags/review", new { eventIds = new[] { id } });
+        Assert.Equal(HttpStatusCode.BadRequest, noToken.StatusCode);
+        Assert.Contains(id, Names((await GetAsync(client, $"/api/v1/flags?{All}")).GetProperty("items"), "eventId"));
+    }
+
     [Fact]
     public async Task MetaShowsToolsAndDataRange()
     {
@@ -195,6 +318,11 @@ public sealed class QueryTests(StoreFixture store)
     [InlineData("/api/v1/sessions?after=abc", "after")]
     [InlineData("/api/v1/sessions/s-c1?internal=maybe", "internal")]
     [InlineData("/api/v1/sessions/bad%20id", "sessionId")]
+    [InlineData("/api/v1/sessions?limit=0", "limit")]
+    [InlineData("/api/v1/flags?limit=201", "limit")]
+    [InlineData("/api/v1/sessions/s-c1?limit=abc", "limit")]
+    [InlineData("/api/v1/events?q=read&limit=500", "limit")]
+    [InlineData("/api/v1/sessions?q=a%01b", "q")]
     public async Task BadArgumentsNameTheFieldNotTheValue(string url, string field)
     {
         await using var host = await ApiTestHost.StartAsync(store, Ct);

@@ -9,8 +9,10 @@ namespace Thadam.Store.Queries;
 /// </summary>
 public sealed class StoreQueries(SegmentIndex index)
 {
-    /// <summary>Rows a page holds (ADR-008 Decision 4: one screen and a scroll, an estimate).</summary>
-    public const int PageSize = 200;
+    /// <summary>Rows a page holds when the caller names no size (ADR-014 Decision 1).</summary>
+    public const int DefaultPageSize = 50;
+    /// <summary>The most rows one page may hold (ADR-008 Decision 4; ADR-014 Decision 1).</summary>
+    public const int MaxPageSize = 200;
     private const int MaxListed = 100;
     private const int MaxSessionTree = 1000;
 
@@ -226,9 +228,11 @@ public sealed class StoreQueries(SegmentIndex index)
 
     /// <summary>Rows of the given sessions after <paramref name="afterSeq"/>, in seq order.</summary>
     public async Task<Page<EventView>> TimelineAsync(
-        IReadOnlyList<string> sessionIds, bool includeInternal, long afterSeq, CancellationToken ct)
+        IReadOnlyList<string> sessionIds, bool includeInternal, long afterSeq, int limit, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(sessionIds);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, MaxPageSize);
         var rows = new List<EventView>();
         if (sessionIds.Count == 0)
         {
@@ -246,19 +250,19 @@ public sealed class StoreQueries(SegmentIndex index)
                 """;
             AddList(cmd, sessionIds);
             cmd.Parameters.AddWithValue("$after", afterSeq);
-            cmd.Parameters.AddWithValue("$limit", PageSize + 1 - rows.Count);
+            cmd.Parameters.AddWithValue("$limit", limit + 1 - rows.Count);
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await r.ReadAsync(ct).ConfigureAwait(false))
             {
                 rows.Add(ReadEvent(r));
             }
-            if (rows.Count > PageSize)
+            if (rows.Count > limit)
             {
                 break;
             }
         }
-        return rows.Count > PageSize
-            ? new Page<EventView>(rows[..PageSize], rows[PageSize - 1].Seq)
+        return rows.Count > limit
+            ? new Page<EventView>(rows[..limit], rows[limit - 1].Seq)
             : new Page<EventView>(rows, null);
     }
 

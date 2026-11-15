@@ -70,14 +70,24 @@ async function csrf(): Promise<string> {
   return (await get(s.token, "/antiforgery")).token;
 }
 
-async function write(method: "POST" | "DELETE", path: string, body?: unknown): Promise<void> {
+async function send<T>(schema: z.ZodType<T>, method: "POST" | "DELETE", path: string, body?: unknown): Promise<T | undefined> {
   const headers: Record<string, string> = { "X-Thadam-Csrf": await csrf() };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  await request(s.errors, path, {
+  return request(schema, path, {
     method,
     headers,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
+}
+
+async function write(method: "POST" | "DELETE", path: string, body?: unknown): Promise<void> {
+  await send(s.errors, method, path, body);
+}
+
+/** Marks flags reviewed or reopens them, one page at most (ADR-014 Decision 5); resolves to how many changed. */
+async function reviewMany(eventIds: string[], reviewed: boolean): Promise<number> {
+  const r = await send(s.changed, "POST", reviewed ? "/flags/review" : "/flags/reopen", { eventIds });
+  return r?.changed ?? 0;
 }
 
 function query(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -129,11 +139,12 @@ export const api = {
   meta: (signal?: AbortSignal) => get(s.meta, "/meta", signal),
   coverage: (a: RangeArgs, signal?: AbortSignal) => get(s.coverage, `/coverage${query({ ...a })}`, signal),
   overview: (a: RangeArgs, signal?: AbortSignal) => get(s.overview, `/overview${query({ ...a })}`, signal),
-  flags: (a: RangeArgs & { status: "open" | "reviewed"; severity?: s.Severity | undefined; after?: number | null }, signal?: AbortSignal) =>
+  flags: (a: RangeArgs & { status: "open" | "reviewed"; severity?: s.Severity | undefined; q?: string; after?: number | null }, signal?: AbortSignal) =>
     get(s.flags, `/flags${query({ ...a })}`, signal),
   review: (eventId: string) => write("POST", `/flags/${encodeURIComponent(eventId)}/review`),
   reopen: (eventId: string) => write("POST", `/flags/${encodeURIComponent(eventId)}/reopen`),
-  sessions: (a: RangeArgs & { after?: number | null }, signal?: AbortSignal) =>
+  reviewMany,
+  sessions: (a: RangeArgs & { q?: string; after?: number | null }, signal?: AbortSignal) =>
     get(s.sessions, `/sessions${query({ ...a })}`, signal),
   timeline: (id: string, a: { internal: boolean; after?: number | null }, signal?: AbortSignal) =>
     get(s.timeline, `/sessions/${encodeURIComponent(id)}${query({ ...a })}`, signal),

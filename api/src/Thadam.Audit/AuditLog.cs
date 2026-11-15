@@ -196,6 +196,37 @@ public sealed class AuditLog : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// <see cref="SetReviewedAsync"/> for several events under one hold of the writer, so no
+    /// other entry lands between them. Returns how many entries were written.
+    /// </summary>
+    public async Task<int> SetReviewedManyAsync(IReadOnlyList<string> eventIds, bool reviewed, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(eventIds);
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
+            var action = reviewed ? AuditAction.FlagReviewed : AuditAction.FlagReopened;
+            var written = 0;
+            foreach (var eventId in eventIds)
+            {
+                ArgumentException.ThrowIfNullOrEmpty(eventId);
+                if (await IsReviewedLockedAsync(eventId, ct).ConfigureAwait(false) == reviewed)
+                {
+                    continue;
+                }
+                await AppendLockedAsync(action, eventId, AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+                written++;
+            }
+            return written;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>Event IDs whose latest review entry is <c>flag_reviewed</c>.</summary>
     public async Task<IReadOnlySet<string>> ReviewedEventsAsync(CancellationToken ct)
     {

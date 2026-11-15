@@ -1,7 +1,7 @@
 // Sessions list and session timeline (mock-up view 3), with delegated child sessions.
 // Prompt rows and other rows the tool reports come from its hook (ADR-011 Decision 6).
 import { useState } from "react";
-import { api } from "../api/client";
+import { api, Rejected } from "../api/client";
 import type { Session } from "../api/schemas";
 import { OsOnly, TimelineCoverage } from "../app/coverage";
 import { EventTable } from "../app/events";
@@ -10,8 +10,9 @@ import { num, utc, when } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { href } from "../app/route";
 import { Empty, Loading, PageHead } from "../app/ui";
+import { GridSearch, Pager } from "../app/grid";
 import { usePaged } from "../app/usePaged";
-
+import { rejection } from "./Search";
 
 /** Session ids are time-ordered, so neighbours share their start; the random tail tells them apart. The full id is in the link's title. */
 const shortId = (id: string): string => (id.length > 12 ? `…${id.slice(-12)}` : id);
@@ -19,11 +20,15 @@ const shortId = (id: string): string => (id.length > 12 ? `…${id.slice(-12)}` 
 const projectName = (p: string | null): string => (p === null ? "no project" : (p.split("/").filter(Boolean).at(-1) ?? p));
 
 function SessionList({ range }: { range: TimeRange }) {
-  const page = usePaged((after, signal) => api.sessions({ ...range, after }, signal), [range.from, range.to]);
+  const [q, setQ] = useState("");
+  const page = usePaged((after, signal) => api.sessions({ ...range, q, after }, signal), [range.from, range.to, q]);
   return (
     <div className="stack">
       <PageHead title="Sessions" sub="Most recently active first" />
       <section className="card">
+        <div className="cardhead">
+          <GridSearch label="Search sessions" placeholder="Session id, tool or project" onSearch={setQ} />
+        </div>
         <div className="scroll">
           <table className="tbl">
             <thead>
@@ -43,10 +48,10 @@ function SessionList({ range }: { range: TimeRange }) {
             </tbody>
           </table>
           {page.items === undefined && page.loading && <Loading />}
-          {page.items?.length === 0 && <Empty>No sessions in this range.</Empty>}
+          {page.items?.length === 0 && <Empty>{q === "" ? "No sessions in this range." : "No sessions match."}</Empty>}
         </div>
       </section>
-      {page.more && <button type="button" className="btn" onClick={page.more}>Load more</button>}
+      <Pager page={page} />
     </div>
   );
 }
@@ -62,14 +67,27 @@ function Child({ s }: { s: Session }) {
 
 function Timeline({ sessionId }: { sessionId: string }) {
   const [internal, setInternal] = useState(false);
+  const [q, setQ] = useState("");
+  const [rejected, setRejected] = useState<string[]>();
   const [head, setHead] = useState<{ session: Session; children: Session[] }>();
   const page = usePaged(
     async (after, signal) => {
-      const t = await api.timeline(sessionId, { internal, after }, signal);
-      setHead((h) => (after === null || h === undefined ? { session: t.session, children: t.children } : h));
-      return { items: t.events, next: t.next };
+      setRejected(undefined);
+      if (q === "") {
+        const t = await api.timeline(sessionId, { internal, after }, signal);
+        setHead((h) => (after === null || h === undefined ? { session: t.session, children: t.children } : h));
+        return { items: t.events, next: t.next, total: t.total, totalCapped: t.totalCapped };
+      }
+      // Text in the grid's box is a search scoped to this session (ADR-014 Decision 3), with the Search page's fields.
+      try {
+        return await api.search(`session:"${sessionId}" ${q}`, after, signal);
+      } catch (e) {
+        if (!(e instanceof Rejected)) throw e;
+        setRejected(e.fields);
+        return { items: [], next: null };
+      }
     },
-    [sessionId, internal],
+    [sessionId, internal, q],
   );
   const s = head?.session.sessionId === sessionId ? head.session : undefined;
   return (
@@ -98,9 +116,15 @@ function Timeline({ sessionId }: { sessionId: string }) {
         <ExportButton source={{ session: sessionId, internal }} />
       </div>
       <section className="card">
-        {page.items === undefined ? page.loading && <Loading /> : page.items.length === 0 ? <Empty>No rows.</Empty> : <EventTable events={page.items} showTool showDay />}
+        <div className="cardhead">
+          <GridSearch label="Search this session" placeholder='Text or fields, e.g. npm or outcome:denied' onSearch={setQ} />
+        </div>
+        {rejected !== undefined ? <p className="pad error" role="alert">{rejection(rejected)}</p>
+          : page.items === undefined ? page.loading && <Loading />
+          : page.items.length === 0 ? <Empty>{q === "" ? "No rows." : "No rows in this session match."}</Empty>
+          : <EventTable events={page.items} showTool showDay />}
       </section>
-      {page.more && <button type="button" className="btn" onClick={page.more}>Load more</button>}
+      <Pager page={page} />
     </div>
   );
 }

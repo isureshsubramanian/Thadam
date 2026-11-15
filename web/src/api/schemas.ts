@@ -98,7 +98,10 @@ export const flagItem = z.object({
 });
 export type FlagItem = z.infer<typeof flagItem>;
 
-export const flags = z.object({ range, items: z.array(flagItem), next: seq.nullable() });
+/** Paging totals (ADR-014): defaults keep a page working against an API that sends none. */
+const totals = { total: count.nullable().default(null), totalCapped: z.boolean().default(false) };
+
+export const flags = z.object({ range, items: z.array(flagItem), next: seq.nullable(), ...totals });
 
 export const session = z.object({
   sessionId: z.string(),
@@ -114,7 +117,7 @@ export const session = z.object({
 });
 export type Session = z.infer<typeof session>;
 
-export const sessions = z.object({ range, items: z.array(session), next: seq.nullable() });
+export const sessions = z.object({ range, items: z.array(session), next: seq.nullable(), ...totals });
 
 export const event = z.object({
   seq,
@@ -149,6 +152,7 @@ export const timeline = z.object({
   children: z.array(session),
   events: z.array(event),
   next: seq.nullable(),
+  ...totals,
 });
 export type Timeline = z.infer<typeof timeline>;
 
@@ -168,10 +172,13 @@ export const search = z.object({
   hosts: z.array(host).nullable(),
   items: z.array(event),
   next: seq.nullable(),
+  ...totals,
 });
 export type SearchResult = z.infer<typeof search>;
 
 export const errors = z.object({ errors: z.array(z.string()) });
+/** Reply to a bulk review or reopen (ADR-014 Decision 5): how many flags changed state. */
+export const changed = z.object({ changed: count });
 /** 413 from /export (ADR-012 Decision 4): how many rows match (null: too many to count) and the limit. */
 export const tooMany = z.object({ errors: z.array(z.string()), rows: count.nullable(), limit: count });
 export const token = z.object({ token: z.string() });

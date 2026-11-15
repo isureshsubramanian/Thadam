@@ -44,6 +44,9 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .pad { padding: 18px; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
+/* A flex item is as wide as its widest content unless told otherwise, so a wide table would
+   stretch its card past the window; this keeps it scrolling inside the card instead. */
+.stack > * { min-width: 0; }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 .spacer { flex: 1; }
@@ -95,7 +98,7 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .kv { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .ks { font-size: 12.5px; color: var(--muted); }
 
-.scroll { overflow-x: auto; }
+.scroll { overflow-x: auto; position: relative; } /* holds visually hidden headers inside the scroll box */
 .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .tbl th { text-align: left; font-weight: 600; font-size: 12px; color: var(--muted); padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .tbl td { padding: 12px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
@@ -135,10 +138,23 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .gaps .tbl td, .gaps .tbl th { padding: 8px 12px; }
 .scrollbox.short { max-height: 240px; margin-top: 8px; }
 
-.flagitem { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; }
-.flagitem .target { display: block; padding: 8px 10px; border-radius: 8px; background: var(--surface2); word-break: break-all; }
-.flagitem .meta { font-size: 12.5px; color: var(--muted); gap: 14px; }
-.actions { align-self: center; }
+/* Grids (ADR-014): a search box in the card head, the pager under the card. */
+.cardhead.toolbar { gap: 12px; flex-wrap: wrap; justify-content: flex-start; }
+.gridsearch { flex: 0 1 340px; min-width: 200px; }
+.gridsearch .ibtn { position: absolute; right: 2px; width: 32px; height: 32px; }
+.field.compact { min-height: 36px; font-size: 13px; padding-right: 36px; }
+.field.compact::-webkit-search-cancel-button { display: none; }
+.pager { justify-content: flex-end; gap: 12px; }
+.pager .btn:disabled { opacity: 0.45; }
+.tbl.flags td { padding: 8px 10px; vertical-align: middle; }
+.tbl.flags th { padding: 10px 10px; }
+.tbl .pick { width: 36px; padding-right: 0; }
+.tbl .pick input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.tbl .cut code { display: block; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.tbl.flags .what { white-space: normal; min-width: 130px; }
+.tbl .act { width: 44px; padding: 2px 4px; }
+.tbl tr.sel td { background: var(--accentSoft); }
+
 
 .searchbar { flex-wrap: nowrap; }
 .fieldwrap { position: relative; flex: 1; display: flex; align-items: center; }

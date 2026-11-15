@@ -6,6 +6,7 @@ export interface Call {
   method: string;
   path: string;
   headers: Record<string, string>;
+  body?: string | undefined;
 }
 
 type Reply = { status: number; body?: unknown; text?: string; headers?: Record<string, string> };
@@ -113,7 +114,7 @@ export function install(routes: Routes): Call[] {
     const method = init?.method ?? "GET";
     const path = input.replace(/^\/api\/v1/, "");
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    const call = { method, path, headers };
+    const call = { method, path, headers, body: typeof init?.body === "string" ? init.body : undefined };
     calls.push(call);
     const key = Object.keys(routes).find((k) => {
       const [m, p] = k.split(" ", 2);

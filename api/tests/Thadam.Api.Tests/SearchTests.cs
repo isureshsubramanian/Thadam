@@ -34,7 +34,7 @@ public sealed class SearchTests(StoreFixture store)
         [.. await index.MatchAsync(SearchParser.FtsQuery([term]), long.MaxValue, 10, Ct)];
 
     private static async Task<long[]> SeqsOf(SearchRunner runner, SearchQuery q) =>
-        [.. (await runner.RunAsync(q, null, Ct)).Page.Items.Select(e => e.Seq)];
+        [.. (await runner.RunAsync(q, null, StoreQueries.MaxPageSize, Ct)).Page.Items.Select(e => e.Seq)];
 
     /// <summary>An index path in a new private folder of its own.</summary>
     private static string TempIndex() => Path.Combine(Path.GetTempPath(), $"thadam-search-{Guid.NewGuid():N}", "search.db");

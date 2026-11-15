@@ -5,7 +5,7 @@ using Thadam.Store.Search;
 namespace Thadam.Api.Endpoints;
 
 /// <summary>
-/// <c>GET /events?q&amp;after</c> (ADR-008 Decisions 4 and 5). Every search is audited
+/// <c>GET /events?q&amp;after&amp;limit</c> (ADR-008 Decisions 4 and 5). Every search is audited
 /// without its query (Decision 6): action, outcome and time only.
 /// </summary>
 public static class SearchEndpoints
@@ -17,18 +17,18 @@ public static class SearchEndpoints
     }
 
     private static async Task<IResult> SearchAsync(
-        string? q, string? after, SearchRunner runner, SearchIndex index, ToolRegistry registry, AuditLog audit,
+        string? q, string? after, string? limit, SearchRunner runner, SearchIndex index, ToolRegistry registry, AuditLog audit,
         TimeProvider time, CancellationToken ct)
     {
         var tools = await registry.ToolsAsync(ct).ConfigureAwait(false);
         var (query, error) = Parse(q, tools, time);
-        var bad = error is not null ? error.Field : !Args.IsAfter(after) ? "after" : null;
+        var bad = error is not null ? error.Field : !Args.IsAfter(after) ? "after" : !Args.IsLimit(limit) ? "limit" : null;
         if (bad is not null || query is null)
         {
             await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Failed, ct).ConfigureAwait(false);
             return Validation.Invalid([bad ?? "q"]);
         }
-        var result = await runner.RunAsync(query, Args.After(after), ct).ConfigureAwait(false);
+        var result = await runner.RunAsync(query, Args.After(after), Args.Limit(limit), ct).ConfigureAwait(false);
         await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
         var names = tools.ToDictionary(t => t.Key, t => t.DisplayName, StringComparer.Ordinal);
         return Results.Json(new
@@ -49,6 +49,9 @@ public static class SearchEndpoints
             hosts = result.Hosts?.Select(QueryEndpoints.Host),
             items = result.Page.Items.Select(e => QueryEndpoints.Event(e, key => names.GetValueOrDefault(key, key))),
             next = result.Page.Next,
+            // The summary, and so the total, comes with the first page; partial: more matched than one request examines.
+            total = result.Summary?.Rows,
+            totalCapped = result.Partial,
         });
     }
 

@@ -95,15 +95,79 @@ describe("dashboard", () => {
     }
   });
 
-  it("Mark reviewed carries the antiforgery token and a text label", async () => {
-    const calls = fake.install({ ...base, "POST /flags/0190f1a2-0000-7000-8000-000000000007/review": { status: 204 } });
+  it("marks the ticked flags reviewed in one call with the antiforgery token and a text label", async () => {
+    const second = { ...fake.flagItem, eventId: "0190f1a2-0000-7000-8000-000000000008", target: "/etc/hosts" };
+    const calls = fake.install({
+      ...base,
+      "GET /flags": { status: 200, body: { range: fake.overview.range, items: [fake.flagItem, second], next: null, total: 2, totalCapped: false } },
+      "POST /flags/review": { status: 200, body: { changed: 2 } },
+    });
     window.location.hash = "#/flagged";
     render(<App />);
     const button = await screen.findByRole("button", { name: "Mark reviewed" });
-    fireEvent.click(button);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select every row on this page" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Mark reviewed (2)" }));
     await waitFor(() => { expect(calls.some((c) => c.method === "POST")).toBe(true); });
     const post = calls.find((c) => c.method === "POST");
+    expect(post?.path).toBe("/flags/review");
     expect(post?.headers["X-Thadam-Csrf"]).toBe("t-123");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ eventIds: [fake.flagItem.eventId, second.eventId] });
+    expect(await screen.findByText("2 flags marked reviewed")).toBeTruthy();
+  });
+
+  it("ticks one row at a time and counts it on the button", async () => {
+    fake.install(base);
+    window.location.hash = "#/flagged";
+    render(<App />);
+    const box = await screen.findByRole("checkbox", { name: /^Select: / });
+    fireEvent.click(box);
+    expect(await screen.findByRole("button", { name: "Mark reviewed (1)" })).toBeTruthy();
+    fireEvent.click(box);
+    expect(await screen.findByRole("button", { name: "Mark reviewed" })).toBeTruthy();
+  });
+
+  it("pages with Next and Prev by the API's after key and shows the rows and total", async () => {
+    const page = (n: number) => ({ ...fake.flagItem, eventId: `0190f1a2-0000-7000-8000-0000000001${String(n).padStart(2, "0")}` });
+    const calls = fake.install({
+      ...base,
+      "GET /flags": (call) => call.path.includes("after=")
+        ? { status: 200, body: { range: fake.overview.range, items: [page(2)], next: null, total: null, totalCapped: false } }
+        : { status: 200, body: { range: fake.overview.range, items: Array.from({ length: 50 }, (_, i) => page(i)), next: 77, total: 51, totalCapped: false } },
+    });
+    window.location.hash = "#/flagged";
+    render(<App />);
+    expect(await screen.findByText("Rows 1–50 of 51")).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Prev" }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Next/ }));
+    expect(await screen.findByText("Rows 51–51 of 51")).toBeTruthy();
+    expect(calls.some((c) => c.path.startsWith("/flags") && c.path.includes("after=77"))).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Prev/ }));
+    expect(await screen.findByText("Rows 1–50 of 51")).toBeTruthy();
+  });
+
+  it("asks the API with the grid's search text once typing pauses", async () => {
+    const calls = fake.install({ ...base, "GET /sessions": { status: 200, body: { range: fake.overview.range, items: [fake.timeline.session], next: null } } });
+    window.location.hash = "#/sessions";
+    render(<App />);
+    await screen.findByText("Rows 1–1");
+    const box = screen.getByRole("searchbox", { name: "Search sessions" });
+    fireEvent.change(box, { target: { value: " sample " } });
+    await waitFor(() => { expect(calls.filter((c) => c.path.startsWith("/sessions")).map((c) => c.path)).toContainEqual(expect.stringContaining("q=sample")); });
+  });
+
+  it("searches inside a session with the session scope added", async () => {
+    const calls = fake.install({
+      ...base,
+      "GET /sessions/s-b1": { status: 200, body: fake.timeline },
+      "GET /events": { status: 200, body: { ...fake.search, items: [] } },
+    });
+    window.location.hash = "#/sessions/s-b1";
+    render(<App />);
+    fireEvent.change(await screen.findByRole("searchbox", { name: "Search this session" }), { target: { value: "npm" } });
+    expect(await screen.findByText("No rows in this session match.")).toBeTruthy();
+    const search = calls.find((c) => c.path.startsWith("/events"));
+    expect(new URLSearchParams(search?.path.split("?")[1]).get("q")).toBe('session:"s-b1" npm');
   });
 
   it("stored values are shown as text, never as markup", async () => {
@@ -195,7 +259,8 @@ describe("coverage and session labels", () => {
     const pill = await screen.findByText("Not watching: 14 min");
     expect(pill.className).toBe("pill flag");
     expect(pill.title).toContain("not running: 2");
-    const rows = (await screen.findAllByRole("row")).map((r) => r.textContent);
+    expect(await screen.findByText("Show 6 gaps")).toBeTruthy();
+    const rows = screen.getAllByRole("row").map((r) => r.textContent);
     for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off · Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "Writing paused: disk low (9 events not written)"]) {
       expect(rows.some((r) => r.includes(label)), label).toBe(true);
     }

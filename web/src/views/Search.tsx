@@ -8,6 +8,7 @@ import { ExportButton } from "../app/ExportButton";
 import { bytes, count, num } from "../app/format";
 import { go } from "../app/route";
 import { Empty, HostFlag, Loading, PageHead } from "../app/ui";
+import { Pager } from "../app/grid";
 import { usePaged } from "../app/usePaged";
 
 const examples = [
@@ -17,7 +18,7 @@ const examples = [
 ];
 
 /** Field names the API can reject, as words; never the text typed. */
-function rejection(fields: string[]): string {
+export function rejection(fields: string[]): string {
   const f = fields[0] ?? "q";
   if (f === "q.unknown") return "That search uses a field name Thadam does not know. Quote text that contains a colon.";
   if (f.startsWith("q.")) return `Check the ${f.slice(2)}: value.`;
@@ -32,7 +33,7 @@ function Results({ q }: { q: string }) {
       try {
         const r = await api.search(q, after, signal);
         if (after === null) setSummary(r);
-        return { items: r.items, next: r.next };
+        return r;
       } catch (e) {
         if (e instanceof Rejected) {
           setRejected(e.fields);
@@ -87,7 +88,7 @@ function Results({ q }: { q: string }) {
       <section className="card">
         {page.items.length === 0 ? <Empty>No rows match.</Empty> : <EventTable events={page.items} showTool showDay />}
       </section>
-      {page.more && <button type="button" className="btn" onClick={page.more}>Load more</button>}
+      <Pager page={page} />
     </div>
   );
 }
