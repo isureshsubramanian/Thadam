@@ -10,6 +10,9 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <InvariantGlobalization>true</InvariantGlobalization>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- Restore also for the published target (ADR-013 Decision 4: scripts/install-api.sh and
+         scripts/package.sh publish for osx-arm64), so publishing leaves the lock files as they are. -->
+    <RuntimeIdentifiers>osx-arm64</RuntimeIdentifiers>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
   <ItemGroup>

@@ -6,7 +6,7 @@
 	<true/>
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
-		<string>content-filter-provider</string>
+		<string>content-filter-provider$(THADAM_NE_ENTITLEMENT_SUFFIX)</string>
 	</array>
 </dict>
 </plist>

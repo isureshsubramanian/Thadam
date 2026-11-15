@@ -26,6 +26,8 @@
 !/scripts/notices.mjs
 !/scripts/notices.sh
 !/scripts/notices-input/
+!/scripts/package.sh
+!/scripts/package/
 !/scripts/preflight.sh
 !/scripts/swift-unwrap-check.pl
 

@@ -13,6 +13,10 @@ SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
 GCC_TREAT_WARNINGS_AS_ERRORS = YES
 
 CODE_SIGN_STYLE = Automatic
+// Development signing uses the plain network-extension entitlement value; a Developer ID
+// build (scripts/package.sh) sets this to "-systemextension", the value Developer ID-signed
+// system extensions must carry (ADR-013 Decision 4).
+THADAM_NE_ENTITLEMENT_SUFFIX =
 CODE_SIGN_IDENTITY = Apple Development
 ENABLE_HARDENED_RUNTIME = YES
 GENERATE_INFOPLIST_FILE = NO

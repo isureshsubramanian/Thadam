@@ -32,7 +32,8 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 (cd web && npm ci --prefer-offline --no-audit --no-fund --silent && npx vite build --logLevel warn)
 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 \
-    dotnet publish api/src/Thadam.Api -c Release -o "$tmp/app" --nologo -v quiet
+    dotnet publish api/src/Thadam.Api -c Release -r osx-arm64 --self-contained false \
+    -o "$tmp/app" --nologo -v quiet
 codesign --force --sign "$identity" --identifier com.nerttiyana.thadam.api \
     --options runtime --entitlements api/packaging/thadam-api.entitlements \
     --timestamp=none "$tmp/app/thadam-api"

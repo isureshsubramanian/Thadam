@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Checks shared by the install and packaging scripts (ADR-013 Decision 5). Sourced, not run.
 #
 # Signing identities are chosen by SHA-1, never by name: two certificates can share a name.

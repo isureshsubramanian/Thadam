@@ -1,0 +1,46 @@
+#!/bin/bash
+# Runs as root after the package's files are in place (ADR-013 Decision 4): the same steps the
+# install scripts take, in their order. Output goes to /var/log/install.log; no values, paths
+# of the user's files only.
+set -u
+thadam="/Library/Application Support/Thadam"
+bin="$thadam/bin"
+app="$thadam/app"
+audit_socket="/var/run/thadam-audit/audit.sock"
+audit_db="$thadam/audit/audit.db"
+
+# Root-owned and writable only by root, whatever the payload carried.
+chown -R root:wheel "$bin" "$app"
+chmod -R go-w "$bin" "$app"
+
+"$bin/thadam-collector" install || { echo "thadam: collector install failed"; exit 1; }
+"$bin/thadam-hook" install-hooks || echo "thadam: hook configuration not installed"
+
+# The API runs as the person signed in at the console, from their launch agent.
+user="$(stat -f %Su /dev/console)"
+if [[ -z "$user" || "$user" == root || "$user" == loginwindow ]]; then
+    echo "thadam: nobody signed in; run '$app/thadam-api install --audit-socket $audit_socket --audit-db \"$audit_db\"' as the user"
+    exit 0
+fi
+uid="$(id -u "$user")"
+home="$(dscl . -read "/Users/$user" NFSHomeDirectory | awk '{ print $2 }')"
+data="$home/Library/Application Support/Thadam/api"
+
+for _ in $(seq 1 40); do
+    [[ -S "$audit_socket" ]] && break
+    sleep 0.25
+done
+if [[ -f "$data/audit.db" ]]; then
+    # Refused (and harmless) once the system log has entries: the copy happens once.
+    "$bin/thadam-collector" import-audit --from "$data/audit.db" --audit-db "$audit_db" \
+        || echo "thadam: old audit log not copied (already copied, or see above)"
+fi
+if [[ -f "$data/credentials.json" ]]; then
+    launchctl asuser "$uid" sudo -u "$user" "$app/thadam-api" install \
+        --audit-socket "$audit_socket" --audit-db "$audit_db" || echo "thadam: API launch agent not installed"
+    # The copy an earlier install script left in the data folder is no longer used.
+    [[ -d "$data/app" ]] && sudo -u "$user" rm -rf "$data/app"
+else
+    echo "thadam: set a password first ('$app/thadam-api set-password'), then run '$app/thadam-api install --audit-socket $audit_socket --audit-db \"$audit_db\"'"
+fi
+exit 0
