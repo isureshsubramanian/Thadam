@@ -71,6 +71,9 @@ pub struct Collapser {
     order: VecDeque<(OffsetDateTime, Key, u64)>,
     next_generation: u64,
     budgets: HashMap<(Option<String>, u32), Budget>,
+    /// No prune before this time: when every budget is still live, pruning on each event
+    /// would walk them all and remove nothing.
+    next_prune: Option<OffsetDateTime>,
 }
 
 fn path_hash(path: &str) -> u64 {
@@ -94,6 +97,7 @@ impl Collapser {
             order: VecDeque::new(),
             next_generation: 0,
             budgets: HashMap::new(),
+            next_prune: None,
         }
     }
 
@@ -118,9 +122,11 @@ impl Collapser {
                 done.push(ev);
             }
         }
-        if self.budgets.len() > BUDGET_PRUNE_AT {
+        if self.budgets.len() > BUDGET_PRUNE_AT && self.next_prune.is_none_or(|t| now >= t) {
             let window = self.window;
             self.budgets.retain(|_, b| b.opened + window > now);
+            // At most once a window: a budget can only expire a window after it opened.
+            self.next_prune = Some(now + window);
         }
         done
     }

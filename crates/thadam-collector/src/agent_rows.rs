@@ -114,7 +114,17 @@ pub struct AgentRows {
     sessions: HashMap<Key, State>,
     /// Recent command lines per Thadam session: (time, raw target).
     execs: HashMap<Arc<str>, VecDeque<(OffsetDateTime, String)>>,
+    /// Nothing waiting closes before this time; `None` after any change, so the next
+    /// `advance` looks. Lets the per-event call skip the walk over every session.
+    quiet_until: Option<Quiet>,
     pub stats: AgentStats,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Quiet {
+    Until(OffsetDateTime),
+    /// No call waits and no ended session is left to forget.
+    Always,
 }
 
 impl AgentRows {
@@ -125,6 +135,7 @@ impl AgentRows {
             held: VecDeque::new(),
             sessions: HashMap::new(),
             execs: HashMap::new(),
+            quiet_until: None,
             stats: AgentStats::default(),
         }
     }
@@ -241,6 +252,7 @@ impl AgentRows {
 
     /// The session's root process exited: whatever is still waiting closes after the grace.
     pub fn session_ended(&mut self, session: &Arc<str>, ts: OffsetDateTime) {
+        self.quiet_until = None;
         for ((s, _), state) in &mut self.sessions {
             if s == session {
                 state.ended = true;
@@ -250,8 +262,21 @@ impl AgentRows {
         self.execs.remove(session);
     }
 
+    /// True when nothing is held and nothing closes by `now`: a call would change nothing.
+    pub fn is_quiet(&self, now: OffsetDateTime) -> bool {
+        self.held.is_empty()
+            && match self.quiet_until {
+                Some(Quiet::Always) => true,
+                Some(Quiet::Until(t)) => now < t,
+                None => false,
+            }
+    }
+
     /// Closes the calls whose time has come and forgets sessions that have ended.
     pub fn advance(&mut self, now: OffsetDateTime) -> Vec<NewEvent> {
+        if self.is_quiet(now) {
+            return Vec::new();
+        }
         let mut rows = Vec::new();
         for state in self.sessions.values_mut() {
             let mut i = 0;
@@ -266,6 +291,13 @@ impl AgentRows {
         }
         self.sessions
             .retain(|_, s| !(s.ended && s.calls.is_empty()));
+        self.quiet_until = Some(
+            self.sessions
+                .values()
+                .flat_map(|s| s.calls.iter().map(|c| c.close_at))
+                .min()
+                .map_or(Quiet::Always, Quiet::Until),
+        );
         rows
     }
 
@@ -286,6 +318,7 @@ impl AgentRows {
     }
 
     fn apply(&mut self, at: OffsetDateTime, sender: Sender, m: &AgentMessage) -> Vec<NewEvent> {
+        self.quiet_until = None;
         let key = (
             Arc::clone(&sender.membership.session_id),
             m.agent_session_id.clone(),

@@ -341,6 +341,10 @@ impl Pipeline {
     }
 
     fn release_agent(&mut self, before: Option<time::OffsetDateTime>) -> Vec<NewEvent> {
+        // Called for every OS event: with nothing held or due, skip the work and the copy.
+        if before.is_some_and(|b| self.agent.is_quiet(b)) {
+            return Vec::new();
+        }
         let (tree, registry) = (&self.tree, &self.registry);
         let lookup = |p: crate::source::agent::Peer| tree.lookup(p.pid, p.pidversion, &[]);
         let sender = |m: &crate::tree::Membership| sender(tree, registry, m);

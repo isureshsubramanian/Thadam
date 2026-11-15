@@ -267,34 +267,45 @@ enum Body {
     },
 }
 
-fn parse(line: &str) -> Result<OsEvent, Skip> {
-    let malformed = Skip {
-        reason: SkipReason::Malformed,
-        seq: None,
+/// Why a line that did not parse as a handled event was skipped. The envelope is checked and
+/// all event keys counted, including unhandled ones, without allocating ignored values.
+fn why_skipped(line: &str) -> Skip {
+    let Ok(shape) = serde_json::from_str::<Shape>(line) else {
+        return Skip {
+            reason: SkipReason::Malformed,
+            seq: None,
+        };
     };
-    // Validate the envelope and count all keys, including unhandled ones, without
-    // allocating values for ignored fields.
+    let seq = shape.global_seq_num.as_ref().and_then(SeqField::value);
+    let reason = match shape.event.0.as_slice() {
+        [kind]
+            if !matches!(
+                kind.as_str(),
+                "exec" | "fork" | "exit" | "open" | "close" | "create" | "rename" | "unlink"
+            ) =>
+        {
+            SkipReason::UnknownEvent
+        }
+        [_] => SkipReason::MissingField,
+        _ => SkipReason::Malformed,
+    };
+    Skip { reason, seq }
+}
+
+fn parse(line: &str) -> Result<OsEvent, Skip> {
     if !line.starts_with('{') {
-        return Err(malformed);
+        return Err(Skip {
+            reason: SkipReason::Malformed,
+            seq: None,
+        });
     }
-    let shape: Shape = serde_json::from_str(line).map_err(|_| Skip {
-        reason: SkipReason::Malformed,
-        seq: None,
-    })?;
+    // Nearly every line is a handled event and parses in this one pass; only a line that
+    // fails is read again, to find its sequence number and why it was skipped.
+    let line: Line = serde_json::from_str(line).map_err(|_| why_skipped(line))?;
     let skip = |reason| Skip {
         reason,
-        seq: shape.global_seq_num.as_ref().and_then(SeqField::value),
+        seq: Some(line.global_seq_num),
     };
-    let [kind] = shape.event.0.as_slice() else {
-        return Err(skip(SkipReason::Malformed));
-    };
-    if !matches!(
-        kind.as_str(),
-        "exec" | "fork" | "exit" | "open" | "close" | "create" | "rename" | "unlink"
-    ) {
-        return Err(skip(SkipReason::UnknownEvent));
-    }
-    let line: Line = serde_json::from_str(line).map_err(|_| skip(SkipReason::MissingField))?;
     let ts =
         OffsetDateTime::parse(&line.time, &Rfc3339).map_err(|_| skip(SkipReason::MissingField))?;
     let kind = match line.event {
