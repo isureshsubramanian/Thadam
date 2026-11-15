@@ -61,7 +61,6 @@ export function Overview({ range }: { range: TimeRange }) {
   const maxFolder = Math.max(1, ...data.outsideFolders.map((f) => f.records));
   return (
     <div className="stack">
-      <CoverageCard range={range} />
       <PageHead title="Overview" sub="All registered AI tools · rows kept after filtering to AI tool process trees" />
       <div className="kpis">
         {kpis(data).map((k) => (
@@ -72,6 +71,7 @@ export function Overview({ range }: { range: TimeRange }) {
           </button>
         ))}
       </div>
+      <CoverageCard range={range} />
 
       <section className="card" aria-labelledby="bytool">
         <div className="cardhead">

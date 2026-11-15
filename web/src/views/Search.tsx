@@ -72,7 +72,7 @@ function Results({ q }: { q: string }) {
       {hosts.length > 0 && (
         <section className="card pad">
           <h2 className="h2">Hosts for the same tool, project and time</h2>
-          <ul className="hosts">
+          <ul className="hosts scrollbox" tabIndex={0} aria-label="Hosts for the same tool, project and time">
             {hosts.map((h) => (
               <li key={`${h.target} ${h.category}`}>
                 <span className="mono clip">{h.target}</span>

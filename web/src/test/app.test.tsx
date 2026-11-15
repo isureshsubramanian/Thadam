@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
+import { groupGaps } from "../app/coverage";
 import { parse, href } from "../app/route";
 import * as fake from "./fake";
 
@@ -111,7 +112,7 @@ describe("dashboard", () => {
     window.location.hash = "#/flagged";
     render(<App />);
     expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeTruthy();
-    expect(document.querySelector("img")).toBeNull();
+    expect(document.querySelector("img:not(.logo)")).toBeNull();
   });
 
   it("marks the rows the tool reported and offers its transcript path to copy, not open", async () => {
@@ -194,9 +195,22 @@ describe("coverage and session labels", () => {
     const pill = await screen.findByText("Not watching: 14 min");
     expect(pill.className).toBe("pill flag");
     expect(pill.title).toContain("not running: 2");
-    for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off", "Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "Writing paused: disk low (9 events not written)"]) {
-      expect(await screen.findByText((text) => text.includes(label))).toBeTruthy();
+    const rows = (await screen.findAllByRole("row")).map((r) => r.textContent);
+    for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off · Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "Writing paused: disk low (9 events not written)"]) {
+      expect(rows.some((r) => r.includes(label)), label).toBe(true);
     }
+    expect(screen.getByText("Show 6 gaps")).toBeTruthy();
+  });
+  it("groups a restart loop and a reboot into single timeline rows", () => {
+    const at = (min: number, sec = 0) => new Date(Date.UTC(2026, 10, 15, 2, min, sec)).toISOString();
+    const g = (from: string, to: string, reason: string, detail: string | null = null) => ({ from, to, reason, detail, missed: null });
+    const loop = Array.from({ length: 10 }, (_, i) => g(at(32, i * 10), at(32, i * 10 + 1), "not_running", "stopped"));
+    const groups = groupGaps([g(at(46), at(47), "machine_off"), g(at(47), at(51), "before_start"), ...loop, g(at(18), at(19), "not_running", "crashed")]);
+    expect(groups.map((x) => [x.label, x.count, x.from, x.to])).toEqual([
+      ["Thadam not running (crashed)", 1, at(18), at(19)],
+      ["Thadam not running (stopped)", 10, at(32), at(33, 31)],
+      ["Mac off · Starting after boot", 1, at(46), at(51)],
+    ]);
   });
   it("says under 1 min for a quick restart, not 0 min", async () => {
     fake.install(coverageRoute([gap("not_running", "stopped")], 0));

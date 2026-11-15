@@ -6,7 +6,7 @@ import type { Session } from "../api/schemas";
 import { OsOnly, TimelineCoverage } from "../app/coverage";
 import { EventTable } from "../app/events";
 import { ExportButton } from "../app/ExportButton";
-import { num, when } from "../app/format";
+import { num, utc, when } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { href } from "../app/route";
 import { Empty, Loading, PageHead } from "../app/ui";
@@ -32,7 +32,7 @@ function SessionList({ range }: { range: TimeRange }) {
                   <td><a className="mono" href={href({ view: "sessions", sessionId: s.sessionId })}>{s.sessionId}</a>{s.parentSessionId !== null && <span className="muted"> · delegated</span>}</td>
                   <td>{s.displayName} {s.prompts === 0 && <OsOnly />}</td>
                   <td>{projectName(s.project)}</td>
-                  <td>{when(s.last)}</td>
+                  <td title={utc(s.last)}>{when(s.last)}</td>
                   <td className="num">{num(s.rows)}</td>
                   <td className="num">{num(s.events)}</td>
                 </tr>

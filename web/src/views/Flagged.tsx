@@ -4,7 +4,7 @@ import { Check, ExternalLink, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { api, AuditUnavailable, SignedOut } from "../api/client";
 import type { FlagItem, Severity } from "../api/schemas";
-import { cap, count, ruleTitle, when, words } from "../app/format";
+import { cap, count, ruleTitle, utc, when, words } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { go } from "../app/route";
 import { useSignedOut } from "../app/session";
@@ -41,7 +41,7 @@ function Item({ f, onChanged }: { f: FlagItem; onChanged: () => void }) {
         <div className="row meta">
           <span>{f.displayName}</span>
           {f.sessionId !== null && <span>Session {f.sessionId}</span>}
-          <span>{when(f.last)}</span>
+          <span title={utc(f.last)}>{when(f.last)}</span>
           <span>
             {count(f.rows, "row")} · {count(f.count, "event")}
           </span>

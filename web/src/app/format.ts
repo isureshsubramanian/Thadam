@@ -1,6 +1,8 @@
-// Display formatting. Times are shown in UTC, as the store records them.
-const dateFmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
-const timeFmt = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: "UTC" });
+// Display formatting. The store records UTC; the page shows this Mac's local time, and the
+// UTC instant on hover (`utc`).
+const dateFmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" });
+const timeFmt = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const utcFmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZone: "UTC" });
 const numFmt = new Intl.NumberFormat("en-GB");
 
 export const num = (n: number): string => numFmt.format(n);
@@ -12,7 +14,25 @@ export const day = (iso: string): string => dateFmt.format(new Date(iso));
 
 export const clock = (iso: string): string => timeFmt.format(new Date(iso));
 
-export const when = (iso: string): string => `${day(iso)} ${clock(iso).slice(0, 5)} UTC`;
+/** The local zone's short name (`IST`, or `GMT+5:30` where the locale has no abbreviation). */
+export const zone: string = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date()).find((p) => p.type === "timeZoneName")?.value ?? "local";
+
+export const when = (iso: string): string => `${day(iso)} ${clock(iso).slice(0, 5)}`;
+
+/** The same instant in UTC, for a hover title. */
+export const utc = (iso: string): string => `${utcFmt.format(new Date(iso))} UTC`;
+
+/** A length of time in words: `45 s`, `12 min`, `3 h 5 min`, `2 d 4 h`. */
+export function span(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${String(s)} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${String(m)} min`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return m % 60 === 0 ? `${String(h)} h` : `${String(h)} h ${String(m % 60)} min`;
+  const d = Math.floor(h / 24);
+  return h % 24 === 0 ? `${String(d)} d` : `${String(d)} d ${String(h % 24)} h`;
+}
 
 export function bytes(n: number): string {
   const units = ["B", "KB", "MB", "GB", "TB"];

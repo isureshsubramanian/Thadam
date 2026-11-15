@@ -101,7 +101,7 @@ function Shell({ meta, onSignOut, onChanged }: { meta: Meta; onSignOut: () => vo
     <div className="app">
       <header className="top">
         <div className="row brand">
-          <ShieldCheck className="ic big" aria-hidden="true" />
+          <img className="logo" src="/favicon.svg" alt="" width={34} height={34} />
           <div>
             <span className="name">Thadam</span>
             <span className="muted small">AI tool audit · this Mac</span>

@@ -2,7 +2,7 @@
 // text; nothing from the store becomes markup (ADR-008 Decision 3).
 import { Copy } from "lucide-react";
 import type { Event } from "../api/schemas";
-import { bytes, categoryName, clock, day, num, words } from "./format";
+import { bytes, categoryName, clock, day, num, utc, words, zone } from "./format";
 import { FlagPills, IconButton, SeverityPill } from "./ui";
 
 function detail(e: Event): string {
@@ -47,7 +47,7 @@ export function EventTable({ events, showTool, showDay }: { events: readonly Eve
       <table className="tbl events">
         <thead>
           <tr>
-            <th>Time (UTC)</th>
+            <th>Time ({zone})</th>
             {showTool === true && <th>Tool</th>}
             <th>Activity</th>
             <th>Target</th>
@@ -58,7 +58,7 @@ export function EventTable({ events, showTool, showDay }: { events: readonly Eve
         <tbody>
           {events.map((e) => (
             <tr key={e.seq}>
-              <td className="mono">{showDay === true ? `${day(e.ts)} ` : ""}{clock(e.ts)}</td>
+              <td className="mono" title={utc(e.ts)}>{showDay === true ? `${day(e.ts)} ` : ""}{clock(e.ts)}</td>
               {showTool === true && <td>{e.displayName}</td>}
               <td>
                 {categoryName[e.category] ?? words(e.category)} · {e.action}
