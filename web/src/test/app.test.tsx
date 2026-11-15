@@ -38,6 +38,23 @@ describe("dashboard", () => {
     expect(await screen.findByLabelText("Password")).toBeTruthy();
   });
 
+  it("shows the collector message when sign-in cannot be audited", async () => {
+    fake.install({ ...base, "GET /meta": { status: 401 }, "POST /session": { status: 503, body: { errors: ["audit"] } } });
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "synthetic password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Not done: the audit log is unavailable because the Thadam collector is not running.");
+    expect(screen.getByLabelText("Password")).toBeTruthy();
+  });
+
+  it("shows the collector message when search cannot be audited", async () => {
+    fake.install({ ...base, "GET /events": { status: 503, body: { errors: ["audit"] } } });
+    window.location.hash = "#/search?q=since%3A7d";
+    render(<App />);
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Not done: the audit log is unavailable because the Thadam collector is not running.");
+    expect(screen.queryByRole("button", { name: "Export CSV" })).toBeNull();
+  });
+
   it("renders the overview from the API", async () => {
     fake.install(base);
     render(<App />);

@@ -69,52 +69,8 @@ pub struct AgentListener {
 impl AgentListener {
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let dir = path
-            .parent()
-            .filter(|d| !d.as_os_str().is_empty())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "agent socket needs a folder")
-            })?;
-        if !dir.exists() {
-            DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
-        }
-        let meta = fs::symlink_metadata(dir)?;
-        if !meta.is_dir() || meta.permissions().mode() & 0o022 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "agent socket folder must not be writable by others",
-            ));
-        }
-        // A newly created file has our effective uid, without a second unsafe interface.
-        let probe = dir.join(format!(".owner-{}", uuid::Uuid::now_v7()));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)?;
-        let owner = file.metadata().map(|m| m.uid());
-        fs::remove_file(&probe)?;
-        if meta.uid() != owner? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "agent socket folder must be owned by this process",
-            ));
-        }
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_socket() => fs::remove_file(&path)?,
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "agent socket path exists and is not a socket",
-                ));
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let listener = UnixListener::bind(&path)?;
-        let bound = Self { listener, path };
-        fs::set_permissions(&bound.path, fs::Permissions::from_mode(0o666))?;
-        Ok(bound)
+        let listener = bind_owned_socket(&path, "agent socket")?;
+        Ok(Self { listener, path })
     }
 
     pub fn serve<F>(self, send: F)
@@ -150,6 +106,61 @@ impl Drop for AgentListener {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+/// Binds a socket anyone may connect to (0666) in a folder only this process may change:
+/// created 0755 if missing, refused if writable by others or owned by someone else. A stale
+/// socket at the path is replaced; any other file there is refused. `what` names the socket
+/// in errors. Shared by the agent and audit sockets.
+pub(crate) fn bind_owned_socket(path: &Path, what: &str) -> io::Result<UnixListener> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{what} needs a folder"),
+            )
+        })?;
+    if !dir.exists() {
+        DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{what} folder must not be writable by others"),
+        ));
+    }
+    // A newly created file has our effective uid, without a second unsafe interface.
+    let probe = dir.join(format!(".owner-{}", uuid::Uuid::now_v7()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    let owner = file.metadata().map(|m| m.uid());
+    fs::remove_file(&probe)?;
+    if meta.uid() != owner? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{what} folder must be owned by this process"),
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => fs::remove_file(path)?,
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{what} path exists and is not a socket"),
+            ));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let listener = UnixListener::bind(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o666))?;
+    Ok(listener)
 }
 
 /// Sent once the sender's identity has been read (see `serve`).
@@ -188,7 +199,7 @@ fn read_connection(stream: UnixStream, peer: Peer, send: &impl Fn(AgentItem) -> 
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Line {
+pub(crate) enum Line {
     /// A line is in the buffer, without its newline.
     Done,
     /// A line over the limit was read and thrown away.
@@ -197,7 +208,11 @@ enum Line {
 }
 
 /// Reads one line into `buf`, keeping at most `max` bytes in memory however long it is.
-fn read_line_limited(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -> io::Result<Line> {
+pub(crate) fn read_line_limited(
+    reader: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> io::Result<Line> {
     buf.clear();
     let mut too_long = false;
     loop {

@@ -8,7 +8,7 @@ namespace Thadam.Api.Tests;
 /// <summary>ADR-008 acceptance test 7 (audit part) and the password store.</summary>
 public sealed class AuditLogTests : IDisposable
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"thadam-audit-test-{Guid.NewGuid():N}");
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), $"ta-{Guid.NewGuid():N}");
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
@@ -20,6 +20,66 @@ public sealed class AuditLogTests : IDisposable
         {
             Directory.Delete(_dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task CollectorRejectsOtherSchemasWithoutMigratingOrChangingPermissions()
+    {
+        Directory.CreateDirectory(_dir);
+        await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = AuditPath, Pooling = false }.ToString()))
+        {
+            await conn.OpenAsync(Ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA user_version = 2";
+            await cmd.ExecuteNonQueryAsync(Ct);
+        }
+        File.SetUnixFileMode(AuditPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
+        var mode = File.GetUnixFileMode(AuditPath);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AuditLog.OpenCollectorAsync(AuditPath, Path.Combine(_dir, "a.sock"), "dev", TimeProvider.System, Ct));
+        Assert.Equal(mode, File.GetUnixFileMode(AuditPath));
+        await using var check = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = AuditPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        await check.OpenAsync(Ct);
+        await using var version = check.CreateCommand();
+        version.CommandText = "PRAGMA user_version";
+        Assert.Equal(2L, await version.ExecuteScalarAsync(Ct));
+    }
+
+    [Fact]
+    public async Task CollectorReadsMissingFileThenAppendsAndRefreshesReviews()
+    {
+        Directory.CreateDirectory(_dir);
+        var socket = Path.Combine(_dir, "a.sock");
+        await using var log = await AuditLog.OpenCollectorAsync(AuditPath, socket, "dev", TimeProvider.System, Ct);
+        Assert.Empty(await log.EntriesAsync(Ct));
+        Assert.Empty(await log.ReviewedEventsAsync(Ct));
+        Assert.Equal(new AuditVerifyReport(0, null), await log.VerifyAsync(Ct));
+        Assert.False(File.Exists(AuditPath));
+        await using var collector = new FakeCollector(socket, AuditPath);
+        await log.CheckAvailableAsync(Ct);
+        var entry = await log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, Ct);
+        Assert.Equal(entry, Assert.Single(await log.EntriesAsync(Ct)));
+        Assert.Equal(1, entry.Seq);
+        Assert.Equal(7, Guid.Parse(entry.AuditId).Version);
+        Assert.True(entry.TsUs > 0);
+        Assert.True(await log.SetReviewedAsync("e-1", true, Ct));
+        Assert.False(await log.SetReviewedAsync("e-1", true, Ct));
+        Assert.True(await log.SetReviewedAsync("e-1", false, Ct));
+        Assert.False(await log.SetReviewedAsync("e-1", false, Ct));
+        Assert.Equal(3, (await log.EntriesAsync(Ct)).Count);
+        Assert.True((await log.VerifyAsync(Ct)).Ok);
+    }
+
+    [Fact]
+    public async Task AbsentCollectorAndRefusedSenderAreUnavailable()
+    {
+        Directory.CreateDirectory(_dir);
+        var socket = Path.Combine(_dir, "a.sock");
+        await using var log = await AuditLog.OpenCollectorAsync(AuditPath, socket, "dev", TimeProvider.System, Ct);
+        await Assert.ThrowsAsync<AuditUnavailableException>(() => log.CheckAvailableAsync(Ct));
+        await using var collector = new FakeCollector(socket, AuditPath) { Error = "refused" };
+        var error = await Assert.ThrowsAsync<AuditUnavailableException>(() => log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, Ct));
+        Assert.Contains("refused", error.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(AuditPath));
     }
 
     [Fact]

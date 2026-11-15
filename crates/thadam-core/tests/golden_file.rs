@@ -6,7 +6,8 @@
 
 use serde_json::Value;
 use thadam_core::{
-    CATALOG_DOMAIN, CanonicalRow, CatalogRow, Encoding, GENESIS, catalog_hash,
+    AUDIT_DOMAIN, AuditRow, CATALOG_DOMAIN, CanonicalRow, CatalogRow, Encoding, GENESIS,
+    audit_hash, catalog_hash,
     encode::{EVENT_DOMAIN_V2, EVENT_DOMAIN_V3},
     row_hash, to_hex,
 };
@@ -102,6 +103,29 @@ fn catalog_vectors_match() {
             missed: opt_int(v, "missed"),
         };
         let h = catalog_hash(&prev, &row).unwrap();
+        assert_eq!(to_hex(&h), text(v, "hash"));
+        prev = h;
+    }
+}
+
+#[test]
+fn audit_v1_vectors_match() {
+    let f = file();
+    assert_eq!(f["audit_v1"]["domain"], AUDIT_DOMAIN);
+    let mut prev = GENESIS;
+    let rows = f["audit_v1"]["rows"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for v in rows {
+        let row = AuditRow {
+            seq: int(v, "seq"),
+            audit_id: text(v, "audit_id"),
+            ts_us: int(v, "ts_us"),
+            actor_id: text(v, "actor_id"),
+            action: text(v, "action"),
+            target_id: text(v, "target_id"),
+            outcome: text(v, "outcome"),
+        };
+        let h = audit_hash(&prev, &row).unwrap();
         assert_eq!(to_hex(&h), text(v, "hash"));
         prev = h;
     }

@@ -558,6 +558,7 @@ name = "thadam-store"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "thadam-core",
  "thiserror",
  "time",

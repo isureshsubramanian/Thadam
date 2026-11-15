@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use thadam_collector::audit::AuditListener;
 use thadam_collector::coverage::{self, Heartbeat};
 use thadam_collector::diag;
 use thadam_collector::pipeline::{Pipeline, Settings};
@@ -33,7 +34,13 @@ const USAGE: &str = "usage:
                        [--agent-socket <path>|off]  (default: as --flow-socket)
                        [--hook-bin <path>]          (the program agent messages must come from;
                                                      default: the installed thadam-hook)
+                       [--audit-socket <path>|off]  (the API's audit entries; default: as --flow-socket)
+                       [--audit-db <file>]          (default: the system audit log)
+                       [--api-bin <path>]           (the program audit entries must come from;
+                                                     default: the installed thadam-api)
                        [--log <file>]               (default: stderr; the file rotates at 1 MB, 5 kept)
+  thadam-collector import-audit --from <file> [--audit-db <file>]
+                       (as root, once: copies the API's old audit log into an empty system one)
   thadam-collector check-registry <file>
   thadam-collector snapshot --registry <file>
   thadam-collector install [--registry <file>] [--store <folder>]   (as root; the system paths by default)
@@ -50,6 +57,7 @@ fn main() -> ExitCode {
         Some("check-registry") => cmd_check(&args[1..]),
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("install") => cmd_install(&args[1..]),
+        Some("import-audit") => cmd_import_audit(&args[1..]),
         Some("uninstall") if args.len() == 1 => cmd_uninstall(),
         _ => Err(Failure::Usage(USAGE.to_string())),
     };
@@ -80,6 +88,10 @@ struct Options {
     flow_socket: Option<String>,
     agent_socket: Option<String>,
     hook_bin: Option<String>,
+    audit_socket: Option<String>,
+    audit_db: Option<String>,
+    api_bin: Option<String>,
+    from: Option<String>,
     log: Option<String>,
 }
 
@@ -95,6 +107,10 @@ fn parse_options(args: &[String]) -> Result<Options, Failure> {
             "--flow-socket" => &mut o.flow_socket,
             "--agent-socket" => &mut o.agent_socket,
             "--hook-bin" => &mut o.hook_bin,
+            "--audit-socket" => &mut o.audit_socket,
+            "--audit-db" => &mut o.audit_db,
+            "--api-bin" => &mut o.api_bin,
+            "--from" => &mut o.from,
             "--log" => &mut o.log,
             _ => return Err(Failure::Usage(USAGE.to_string())),
         };
@@ -198,6 +214,10 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     let source = o.source.as_deref().unwrap_or("eslogger");
     let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
     let agents = open_agent_socket(o.agent_socket.as_deref(), source)?;
+    if let Some(listener) = open_audit_socket(&o, source)? {
+        // Not joined, as the other listeners: it waits in accept for as long as the process runs.
+        std::thread::spawn(move || listener.serve());
+    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut signals =
@@ -280,6 +300,10 @@ fn cmd_install(args: &[String]) -> Result<(), Failure> {
         || o.flow_socket.is_some()
         || o.agent_socket.is_some()
         || o.hook_bin.is_some()
+        || o.audit_socket.is_some()
+        || o.audit_db.is_some()
+        || o.api_bin.is_some()
+        || o.from.is_some()
         || o.log.is_some()
     {
         return Err(Failure::Usage(USAGE.to_string()));
@@ -429,6 +453,46 @@ fn open_agent_socket(arg: Option<&str>, source: &str) -> Result<Option<AgentList
             }
         },
     }
+}
+
+/// The audit socket (ADR-013 Decision 3). On the system path a failure is reported and the
+/// collector runs on: the API then refuses audited actions, so nothing goes unaudited.
+fn open_audit_socket(o: &Options, source: &str) -> Result<Option<AuditListener>, Failure> {
+    let db = Path::new(o.audit_db.as_deref().unwrap_or(thadam_core::AUDIT_DB));
+    let api = Path::new(o.api_bin.as_deref().unwrap_or(thadam_core::API_BIN));
+    match (o.audit_socket.as_deref(), source) {
+        (Some("off"), _) | (None, "stdin") => Ok(None),
+        (Some(path), _) => AuditListener::bind(Path::new(path), db, api)
+            .map(Some)
+            .map_err(|e| Failure::Usage(format!("cannot listen for audit entries: {e}"))),
+        (None, _) => match AuditListener::bind(Path::new(thadam_core::AUDIT_SOCKET), db, api) {
+            Ok(l) => Ok(Some(l)),
+            Err(e) => {
+                diag!("thadam-collector: audit entries not accepted, cannot listen: {e}");
+                Ok(None)
+            }
+        },
+    }
+}
+
+fn cmd_import_audit(args: &[String]) -> Result<(), Failure> {
+    let o = parse_options(args)?;
+    let from = o
+        .from
+        .as_deref()
+        .ok_or_else(|| Failure::Usage(USAGE.to_string()))?;
+    let db = o.audit_db.as_deref().unwrap_or(thadam_core::AUDIT_DB);
+    let mut log = thadam_collector::audit::open_log(Path::new(db)).map_err(|e| match e {
+        thadam_store::StoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Failure::Usage("run import-audit with sudo".into())
+        }
+        e => Failure::Runtime(e.to_string()),
+    })?;
+    let copied = log
+        .import(from)
+        .map_err(|e| Failure::Runtime(e.to_string()))?;
+    println!("OK    {copied} audit entries copied; the old file is unchanged");
+    Ok(())
 }
 
 fn seed_from_snapshot(pipeline: &mut Pipeline) {

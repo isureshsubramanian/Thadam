@@ -32,21 +32,25 @@ public sealed record AuditVerifyReport(long Verified, long? BrokenAt)
 /// <summary>
 /// <c>audit.db</c>: append-only (triggers reject UPDATE and DELETE), hash-chained with domain
 /// tag <c>thadam.audit.v1</c> using the event chain's encoding (ADR-002 Decision 5). The file
-/// and its folder are the user's only (0600, 0700). One writer: calls are serialised.
+/// and its folder are private in local mode; collector mode reads root-owned files.
+/// Calls from this API are serialised.
 /// </summary>
 public sealed class AuditLog : IAsyncDisposable
 {
     public const string Domain = "thadam.audit.v1";
     private const long SchemaVersion = 1;
 
-    private readonly SqliteConnection _conn;
+    private SqliteConnection? _connection;
+    private SqliteConnection _conn => _connection!;
+    private string? _readPath;
+    private CollectorWriter? _collector;
     private readonly TimeProvider _time;
     private readonly string _actor;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    private AuditLog(SqliteConnection conn, TimeProvider time, string actor)
+    private AuditLog(SqliteConnection? conn, TimeProvider time, string actor)
     {
-        _conn = conn;
+        _connection = conn;
         _time = time;
         _actor = actor;
     }
@@ -96,6 +100,60 @@ public sealed class AuditLog : IAsyncDisposable
         }
     }
 
+    public static async Task<AuditLog> OpenCollectorAsync(
+        string path, string socketPath, string actor, TimeProvider time, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        ArgumentException.ThrowIfNullOrEmpty(socketPath);
+        ArgumentException.ThrowIfNullOrEmpty(actor);
+        ArgumentNullException.ThrowIfNull(time);
+        var log = new AuditLog(null, time, actor)
+        {
+            _readPath = path,
+            _collector = new CollectorWriter(socketPath, actor),
+        };
+        try
+        {
+            await log.RefreshReaderAsync(ct).ConfigureAwait(false);
+            return log;
+        }
+        catch
+        {
+            await log.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    public Task CheckAvailableAsync(CancellationToken ct) => _collector?.PingAsync(ct) ?? Task.CompletedTask;
+
+    private async Task RefreshReaderAsync(CancellationToken ct)
+    {
+        if (_readPath is null) return;
+        if (_connection is not null) await _connection.DisposeAsync().ConfigureAwait(false);
+        _connection = null;
+        if (!File.Exists(_readPath)) return;
+        var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = _readPath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        try
+        {
+            await conn.OpenAsync(ct).ConfigureAwait(false);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA query_only = ON; PRAGMA user_version;";
+            if ((long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L) != SchemaVersion)
+                throw new InvalidOperationException("audit.db schema version is not supported");
+            _connection = conn;
+        }
+        catch
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
     public async Task<AuditEntry> AppendAsync(
         AuditAction action, string targetId, AuditOutcome outcome, CancellationToken ct)
     {
@@ -122,6 +180,7 @@ public sealed class AuditLog : IAsyncDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
             var current = await IsReviewedLockedAsync(eventId, ct).ConfigureAwait(false);
             if (current == reviewed)
             {
@@ -143,6 +202,8 @@ public sealed class AuditLog : IAsyncDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
+            if (_connection is null) return new HashSet<string>(StringComparer.Ordinal);
             await using var cmd = _conn.CreateCommand();
             cmd.CommandText = """
                 SELECT target_id FROM audit a
@@ -171,6 +232,8 @@ public sealed class AuditLog : IAsyncDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
+            if (_connection is null) return Array.Empty<AuditEntry>();
             var list = new List<AuditEntry>();
             await using var cmd = _conn.CreateCommand();
             cmd.CommandText = "SELECT seq, audit_id, ts_us, actor_id, action, target_id, outcome FROM audit ORDER BY seq";
@@ -193,6 +256,8 @@ public sealed class AuditLog : IAsyncDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
+            if (_connection is null) return new AuditVerifyReport(0, null);
             await using var cmd = _conn.CreateCommand();
             cmd.CommandText = "SELECT seq, audit_id, ts_us, actor_id, action, target_id, outcome, prev_hash, hash FROM audit ORDER BY seq";
             await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -239,13 +304,15 @@ public sealed class AuditLog : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await _conn.DisposeAsync().ConfigureAwait(false);
+        if (_connection is not null) await _connection.DisposeAsync().ConfigureAwait(false);
         _gate.Dispose();
     }
 
     private async Task<AuditEntry> AppendLockedAsync(
         AuditAction action, string targetId, AuditOutcome outcome, CancellationToken ct)
     {
+        if (_collector is not null)
+            return await _collector.AppendAsync(action, targetId, outcome, ct).ConfigureAwait(false);
         await using var tx = (SqliteTransaction)await _conn.BeginTransactionAsync(ct).ConfigureAwait(false);
         await using var last = _conn.CreateCommand();
         last.Transaction = tx;
@@ -290,6 +357,7 @@ public sealed class AuditLog : IAsyncDisposable
 
     private async Task<bool> IsReviewedLockedAsync(string eventId, CancellationToken ct)
     {
+        if (_connection is null) return false;
         await using var cmd = _conn.CreateCommand();
         cmd.CommandText = """
             SELECT action FROM audit

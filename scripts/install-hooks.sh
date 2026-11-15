@@ -3,17 +3,15 @@
 # Asks for sudo.
 #
 # Signed with the same identity as the collector, so the collector can tell the installed
-# hook from any other program that writes to its agent socket. The identity is read from
-# the keychain, never stored in the repo; THADAM_SIGNING_IDENTITY overrides it.
+# hook from any other program that writes to its agent socket. The identity is chosen by SHA-1
+# (see preflight.sh), never stored in the repo.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/preflight.sh
 
-identity="${THADAM_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning \
-    | awk -F'"' '/Apple Development/ { print $2; exit }')}"
-if [[ -z "$identity" ]]; then
-    echo "no Apple Development signing identity in the keychain"
-    exit 1
-fi
+preflight_not_root
+identity="$(preflight_identity "${THADAM_SIGNING_KIND:-development}")"
+preflight_test_sign "$identity"
 
 cargo build --release -q -p thadam-hook
 tmp="$(mktemp -d)"
@@ -22,3 +20,4 @@ cp target/release/thadam-hook "$tmp/"
 codesign --force --sign "$identity" --identifier com.nerttiyana.thadam.hook \
     --options runtime --timestamp=none "$tmp/thadam-hook"
 sudo "$tmp/thadam-hook" install-hooks "$@"
+postflight_check "$tmp/thadam-hook" "/Library/Application Support/Thadam/bin/thadam-hook"

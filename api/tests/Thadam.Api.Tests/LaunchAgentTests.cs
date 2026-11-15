@@ -18,6 +18,28 @@ public sealed class LaunchAgentTests
         dict.Elements("key").FirstOrDefault(k => k.Value == key)?.ElementsAfterSelf().First();
 
     [Fact]
+    public void CollectorOptionsUseSystemDatabaseAndValidatePaths()
+    {
+        var (options, error) = ApiOptions.Parse(["--audit-socket", "/var/run/thadam-audit/audit.sock"]);
+        Assert.Null(error);
+        Assert.NotNull(options);
+        Assert.Equal("/Library/Application Support/Thadam/audit/audit.db", options.AuditPath);
+        Assert.NotNull(ApiOptions.Parse(["--audit-socket", "relative"]).Error);
+        Assert.NotNull(ApiOptions.Parse(["--audit-db", "relative"]).Error);
+        var local = ApiOptions.Defaults();
+        Assert.Equal(Path.Combine(local.DataDir, "audit.db"), local.AuditPath);
+    }
+
+    [Fact]
+    public void CollectorArgumentsAreEscapedAndPreserved()
+    {
+        var options = Options with { AuditSocket = "/synthetic/a & <b>.sock", AuditDb = "/synthetic/audit.db" };
+        var dict = Dict(LaunchAgent.Plist("/synthetic/bin/thadam-api", options, "/synthetic/api.log"));
+        var args = ValueOf(dict, "ProgramArguments")!.Elements("string").Select(e => e.Value).ToArray();
+        Assert.Equal(["--audit-socket", options.AuditSocket, "--audit-db", options.AuditDb], args[^4..]);
+    }
+
+    [Fact]
     public void TheAgentRunsTheInstallingExecutableWithItsOptions()
     {
         var dict = Dict(LaunchAgent.Plist("/synthetic/bin/thadam-api", Options, "/synthetic/api.log"));

@@ -2,7 +2,7 @@
 // the API's only domain writes (ADR-008 Decision 7). Commit actions carry text labels.
 import { Check, ExternalLink, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { api, SignedOut } from "../api/client";
+import { api, AuditUnavailable, SignedOut } from "../api/client";
 import type { FlagItem, Severity } from "../api/schemas";
 import { cap, count, ruleTitle, when, words } from "../app/format";
 import type { TimeRange } from "../app/range";
@@ -17,16 +17,16 @@ const severities: (Severity | undefined)[] = [undefined, "high", "medium", "low"
 function Item({ f, onChanged }: { f: FlagItem; onChanged: () => void }) {
   const signedOut = useSignedOut();
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string>();
   const act = (review: boolean) => {
     setBusy(true);
-    setFailed(false);
+    setFailed(undefined);
     (review ? api.review(f.eventId) : api.reopen(f.eventId)).then(
       () => { setBusy(false); onChanged(); },
       (e: unknown) => {
         setBusy(false);
         if (e instanceof SignedOut) signedOut();
-        else setFailed(true);
+        else setFailed(e instanceof AuditUnavailable ? e.message : "That did not save. Try again.");
       },
     );
   };
@@ -46,7 +46,7 @@ function Item({ f, onChanged }: { f: FlagItem; onChanged: () => void }) {
             {count(f.rows, "row")} · {count(f.count, "event")}
           </span>
         </div>
-        {failed && <p className="sub error" role="status">That did not save. Try again.</p>}
+        {failed && <p className="sub error" role="status">{failed}</p>}
       </div>
       <div className="row actions">
         {f.sessionId !== null && (

@@ -18,6 +18,10 @@ namespace Thadam.Api;
 /// <summary>Builds the web application: one process serves the API and, later, the dashboard.</summary>
 public static class ApiHost
 {
+    private static readonly string[] AuditErrors = ["audit"];
+    private static readonly Action<ILogger, Exception?> AuditFailed =
+        LoggerMessage.Define(LogLevel.Warning, new EventId(20), "Audit append unavailable");
+
     public const string SignInPolicy = "sign-in";
     public const string CookieName = "thadam_session";
     public const string CsrfCookieName = "thadam_csrf";
@@ -57,7 +61,9 @@ public static class ApiHost
 
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton(time);
-        var audit = await AuditLog.OpenAsync(options.AuditPath, Environment.UserName, time, ct).ConfigureAwait(false);
+        var audit = await (options.AuditSocket is { } socket
+            ? AuditLog.OpenCollectorAsync(options.AuditPath, socket, Environment.UserName, time, ct)
+            : AuditLog.OpenAsync(options.AuditPath, Environment.UserName, time, ct)).ConfigureAwait(false);
         builder.Services.AddSingleton(audit);
         var store = new StoreFolder(options.StorePath);
         builder.Services.AddSingleton(store);
@@ -132,6 +138,17 @@ public static class ApiHost
             c.Response.StatusCode = StatusCodes.Status500InternalServerError;
             return Task.CompletedTask;
         }));
+        app.Use(async (context, next) =>
+        {
+            try { await next(context).ConfigureAwait(false); }
+            catch (AuditUnavailableException)
+            {
+                AuditFailed(app.Logger, null);
+                if (context.Response.HasStarted) throw;
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                await context.Response.WriteAsJsonAsync(new { errors = AuditErrors }).ConfigureAwait(false);
+            }
+        });
         app.UseStatusCodePages();
         // The dashboard: static files from the same origin, so one cookie and no CORS
         // (ADR-008 Decision 1). Public files; every API call still needs the session.

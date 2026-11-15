@@ -5,6 +5,7 @@
 //! reject UPDATE and DELETE, which stops accidental or casual change. They do not stop
 //! someone with write access to the file; the chain is what makes such change detectable.
 
+mod audit;
 mod catalog;
 mod disk;
 mod schema;
@@ -17,6 +18,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params_f
 use thadam_core::{CanonicalRow, CoreError, Encoding, EventRecord, GENESIS, row_hash, to_hex};
 use thiserror::Error;
 
+pub use audit::{AuditDb, AuditReport};
 pub use catalog::{CATALOG_V1_BACKUP, Catalog, CatalogEntry, CatalogReport};
 pub use disk::{DiskSpace, SystemDisk};
 pub use segments::{

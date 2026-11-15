@@ -48,8 +48,8 @@ public static class SessionEndpoints
         }
         var identity = new ClaimsIdentity(
             [new Claim(ClaimTypes.Name, Environment.UserName)], CookieAuthenticationDefaults.AuthenticationScheme);
-        await http.SignInAsync(new ClaimsPrincipal(identity)).ConfigureAwait(false);
         await audit.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+        await http.SignInAsync(new ClaimsPrincipal(identity)).ConfigureAwait(false);
         return Results.NoContent();
     }
 

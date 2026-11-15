@@ -1383,3 +1383,116 @@ fn agent_messages_from_the_hook_become_rows_of_its_session() {
     let verify = verify_dir(&store).unwrap();
     assert_eq!(verify.broken, None);
 }
+
+fn audit_ask(socket: &Path, line: &str) -> serde_json::Value {
+    use std::io::BufRead;
+    let mut c = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    c.write_all(line.as_bytes()).unwrap();
+    let mut reply = String::new();
+    std::io::BufReader::new(&mut c)
+        .read_line(&mut reply)
+        .unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
+#[test]
+fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
+    // This test process plays the installed API (ADR-013 Decision 3).
+    let tmp = TempDir::new("audit");
+    let db = tmp.path("audit").join("audit.db");
+    let old = tmp.path("old-audit.db");
+    {
+        let mut log = thadam_store::AuditDb::open(&old).unwrap();
+        log.append(
+            "0193b000-0000-7000-8000-000000000001",
+            1,
+            "dev",
+            "sign_in",
+            "",
+            "succeeded",
+        )
+        .unwrap();
+        log.append(
+            "0193b000-0000-7000-8000-000000000002",
+            2,
+            "dev",
+            "search",
+            "",
+            "succeeded",
+        )
+        .unwrap();
+    }
+    let import = Command::new(BIN)
+        .args(["import-audit", "--from"])
+        .arg(&old)
+        .arg("--audit-db")
+        .arg(&db)
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    assert!(String::from_utf8_lossy(&import.stdout).contains("2 audit entries copied"));
+    // Once only.
+    let again = Command::new(BIN)
+        .args(["import-audit", "--from"])
+        .arg(&old)
+        .arg("--audit-db")
+        .arg(&db)
+        .output()
+        .unwrap();
+    assert!(!again.status.success());
+
+    let socket = tmp.path("sock").join("audit.sock");
+    let mut child = Command::new(BIN)
+        .args(["run", "--source", "stdin", "--registry"])
+        .arg(tmp.path("registry.json"))
+        .arg("--store")
+        .arg(tmp.path("store"))
+        .arg("--audit-socket")
+        .arg(&socket)
+        .arg("--audit-db")
+        .arg(&db)
+        .arg("--api-bin")
+        .arg(std::env::current_exe().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(std::time::Instant::now() < deadline, "no audit socket");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let reply = audit_ask(
+        &socket,
+        "{\"contract\":\"thadam.audit-append.v1\",\"actor\":\"dev\",\"action\":\"export\",\"target\":\"0193b000-0000-7000-8000-0000000000e1\",\"outcome\":\"succeeded\"}\n",
+    );
+    assert_eq!(reply["seq"], 3);
+    // Another program is refused; nothing is written.
+    let refused = Command::new("/usr/bin/nc")
+        .args(["-U"])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut nc| {
+            nc.stdin
+                .take()
+                .unwrap()
+                .write_all(b"{\"contract\":\"thadam.audit-append.v1\",\"ping\":true}\n")?;
+            nc.wait_with_output()
+        })
+        .unwrap();
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("refused"));
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let log = thadam_store::AuditDb::open_read_only(&db).unwrap();
+    assert_eq!(log.len().unwrap(), 3);
+    assert_eq!(log.verify().unwrap().broken_at, None);
+    assert_eq!(log.entries().unwrap()[2].action, "export");
+}

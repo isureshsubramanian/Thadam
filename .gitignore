@@ -19,12 +19,14 @@
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
+!/scripts/install-api.sh
 !/scripts/install-collector.sh
 !/scripts/install-hooks.sh
 !/scripts/migrate-store.sh
 !/scripts/notices.mjs
 !/scripts/notices.sh
 !/scripts/notices-input/
+!/scripts/preflight.sh
 !/scripts/swift-unwrap-check.pl
 
 # Never commit data or build output, even inside allowed folders.

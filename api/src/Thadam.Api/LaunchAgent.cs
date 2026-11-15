@@ -24,7 +24,7 @@ internal static class LaunchAgent
     public static string Plist(string executable, ApiOptions options, string logPath)
     {
         ArgumentNullException.ThrowIfNull(options);
-        string[] arguments =
+        List<string> arguments =
         [
             executable, "run",
             "--store", options.StorePath,
@@ -32,6 +32,8 @@ internal static class LaunchAgent
             "--data-dir", options.DataDir,
             "--port", options.Port.ToString(CultureInfo.InvariantCulture),
         ];
+        if (options.AuditSocket is { } socket) arguments.AddRange(["--audit-socket", socket]);
+        if (options.AuditDb is { } db) arguments.AddRange(["--audit-db", db]);
         var dict = new XElement("dict",
             Key("Label"), new XElement("string", Label),
             Key("ProgramArguments"), new XElement("array", arguments.Select(a => new XElement("string", a))),

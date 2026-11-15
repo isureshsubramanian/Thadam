@@ -82,7 +82,7 @@
     ]
   },
   "audit_v1": {
-    "comment": "The API's audit.db chain (C# only; vectors from an independent Python implementation).",
+    "comment": "The audit.db chain (Rust writer and C# reader; vectors from an independent Python implementation).",
     "domain": "thadam.audit.v1",
     "rows": [
       {

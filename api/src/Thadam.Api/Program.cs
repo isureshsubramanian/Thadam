@@ -7,10 +7,10 @@ using Thadam.Audit;
 // queries or values.
 const string Usage = """
     usage:
-      thadam-api run [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>]
+      thadam-api run [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>] [--audit-socket <path>] [--audit-db <path>]
       thadam-api set-password [--data-dir <folder>]
-      thadam-api verify-audit [--data-dir <folder>]
-      thadam-api install [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>]
+      thadam-api verify-audit [--data-dir <folder>] [--audit-socket <path>] [--audit-db <path>]
+      thadam-api install [--store <folder>] [--registry <file>] [--data-dir <folder>] [--port <n>] [--audit-socket <path>] [--audit-db <path>]
       thadam-api uninstall
     """;
 

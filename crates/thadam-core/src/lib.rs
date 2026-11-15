@@ -3,6 +3,7 @@
 //! stored, and the wire format agent hooks send. This crate performs no I/O.
 
 pub mod agent;
+pub mod audit;
 pub mod catalog;
 pub mod chain;
 pub mod detect;
@@ -14,6 +15,11 @@ pub mod model;
 
 pub use agent::{
     AGENT_SOCKET, AGENT_WIRE, AgentKind, AgentMessage, CallKind, HOOK_BIN, Reason, hook_command,
+};
+pub use audit::{
+    API_BIN, AUDIT_ACTIONS, AUDIT_DB, AUDIT_DOMAIN, AUDIT_OUTCOMES, AUDIT_SOCKET, AUDIT_WIRE,
+    AuditCommand, AuditError, AuditReply, AuditRequest, AuditRow, MAX_AUDIT_LINE, audit_hash,
+    encode_audit,
 };
 pub use catalog::{CATALOG_DOMAIN, CatalogKind, CatalogRow, catalog_hash, encode_catalog};
 pub use chain::{GENESIS, row_hash, to_hex};

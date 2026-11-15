@@ -6,7 +6,12 @@ public sealed record ApiOptions(string StorePath, string RegistryPath, string Da
     public const int DefaultPort = 7341;
     public const string SystemFolder = "/Library/Application Support/Thadam";
 
-    public string AuditPath => Path.Combine(DataDir, "audit.db");
+    public string? AuditSocket { get; init; }
+
+    public string? AuditDb { get; init; }
+
+    public string AuditPath => AuditSocket is null ? Path.Combine(DataDir, "audit.db")
+        : AuditDb ?? Path.Combine(SystemFolder, "audit", "audit.db");
 
     public string CredentialsPath => Path.Combine(DataDir, "credentials.json");
 
@@ -58,10 +63,16 @@ public sealed record ApiOptions(string StorePath, string RegistryPath, string Da
                 case "--data-dir" when Path.IsPathFullyQualified(value):
                     o = o with { DataDir = value };
                     break;
+                case "--audit-socket" when Path.IsPathFullyQualified(value):
+                    o = o with { AuditSocket = value };
+                    break;
+                case "--audit-db" when Path.IsPathFullyQualified(value):
+                    o = o with { AuditDb = value };
+                    break;
                 case "--port" when int.TryParse(value, out var port) && port is 0 or (>= 1024 and <= 65535):
                     o = o with { Port = port };
                     break;
-                case "--store" or "--registry" or "--data-dir":
+                case "--store" or "--registry" or "--data-dir" or "--audit-socket" or "--audit-db":
                     return (null, $"{args[i]} must be an absolute path");
                 case "--port":
                     return (null, "--port must be 1024 to 65535");

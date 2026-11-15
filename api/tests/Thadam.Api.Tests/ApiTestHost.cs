@@ -54,7 +54,7 @@ public sealed class ApiTestHost : IAsyncDisposable
     }
 
     /// <summary>A server over any store folder (the benchmark's).</summary>
-    public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct, int? exportMaxRows = null)
+    public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct, int? exportMaxRows = null, string? auditSocket = null, string? auditDb = null)
     {
         var dataDir = Path.Combine(Path.GetTempPath(), $"thadam-api-test-{Guid.NewGuid():N}");
         // A synthetic dashboard and notices file, so tests don't depend on the web build.
@@ -63,6 +63,8 @@ public sealed class ApiTestHost : IAsyncDisposable
         await File.WriteAllTextAsync(Path.Combine(webDir, "index.html"), "<!doctype html><title>test dashboard</title>", ct);
         var options = new ApiOptions(storeFolder, Path.Combine(dataDir, "registry.json"), dataDir, 0)
         {
+            AuditSocket = auditSocket,
+            AuditDb = auditDb,
             WebDir = webDir,
             NoticesPath = Path.Combine(dataDir, "notices.txt"),
             ExportMaxRows = exportMaxRows ?? Export.CsvExport.MaxRows,

@@ -1,7 +1,7 @@
 // Local sign-in (ADR-008 Decision 2). The password is sent once and never kept here.
 import { LogIn, ShieldCheck } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
-import { api, ApiFailed, Rejected } from "../api/client";
+import { api, ApiFailed, AuditUnavailable, Rejected } from "../api/client";
 
 export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState("");
@@ -19,7 +19,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       (err: unknown) => {
         setBusy(false);
         setMessage(
-          err instanceof ApiFailed && err.message.includes("429")
+          err instanceof AuditUnavailable ? err.message : err instanceof ApiFailed && err.message.includes("429")
             ? "Too many attempts. Wait a minute and try again."
             : err instanceof Rejected
               ? "Enter your password."

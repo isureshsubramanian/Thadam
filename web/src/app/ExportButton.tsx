@@ -2,11 +2,12 @@
 // A primary action, so it carries a text label beside its icon (global UI rule).
 import { Download } from "lucide-react";
 import { useState } from "react";
-import { api, Rejected, SignedOut, TooMany, type ExportSource } from "../api/client";
+import { api, AuditUnavailable, Rejected, SignedOut, TooMany, type ExportSource } from "../api/client";
 import { num } from "./format";
 import { useSignedOut } from "./session";
 
 function message(e: unknown): string {
+  if (e instanceof AuditUnavailable) return e.message;
   if (e instanceof TooMany) {
     const n = e.rows === null ? "More than" : `${num(e.rows)} rows match;`;
     return `${n} the limit is ${num(e.limit)}. Narrow the time range or add a filter.`;

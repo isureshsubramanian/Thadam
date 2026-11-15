@@ -2,6 +2,7 @@
 //! turns them into records and appends them to the store.
 
 pub mod agent_rows;
+pub mod audit;
 pub mod classify;
 pub mod collapse;
 pub mod coverage;

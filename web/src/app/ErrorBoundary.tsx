@@ -3,6 +3,8 @@
 // the area and the error type only: messages can carry row data.
 import { Component, type ReactNode } from "react";
 
+import { AuditUnavailable } from "../api/client";
+
 interface Props {
   area: string;
   children: ReactNode;
@@ -11,13 +13,14 @@ interface Props {
 
 interface State {
   failed: boolean;
+  audit?: string;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
   override state: State = { failed: false };
 
-  static getDerivedStateFromError(): State {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown): State {
+    return error instanceof AuditUnavailable ? { failed: true, audit: error.message } : { failed: true };
   }
 
   override componentDidCatch(error: unknown): void {
@@ -27,6 +30,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   override render(): ReactNode {
     if (!this.state.failed) return this.props.children;
+    if (this.state.audit !== undefined) return <p className="card pad error" role="alert">{this.state.audit}</p>;
     return (
       this.props.fallback ?? (
         <div className="card fallback" role="alert">

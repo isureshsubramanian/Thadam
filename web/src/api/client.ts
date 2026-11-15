@@ -10,6 +10,20 @@ export class SignedOut extends Error {
   override name = "SignedOut";
 }
 
+export const auditUnavailableMessage = "Not done: the audit log is unavailable because the Thadam collector is not running.";
+
+export class AuditUnavailable extends Error {
+  override name = "AuditUnavailable";
+  constructor() { super(auditUnavailableMessage); }
+}
+
+async function checkAudit(res: Response): Promise<void> {
+  if (res.status !== 503) return;
+  const body: unknown = await res.json().catch(() => ({}));
+  const parsed = s.errors.safeParse(body);
+  if (parsed.success && parsed.data.errors.length === 1 && parsed.data.errors[0] === "audit") throw new AuditUnavailable();
+}
+
 /** A 400 from the API: the field names it rejected (never values). */
 export class Rejected extends Error {
   override name = "Rejected";
@@ -33,6 +47,7 @@ export class ApiFailed extends Error {
 
 async function request<T>(schema: z.ZodType<T>, path: string, init?: RequestInit): Promise<T | undefined> {
   const res = await fetch(base + path, { credentials: "same-origin", ...init });
+  await checkAudit(res);
   if (res.status === 401) throw new SignedOut("signed out");
   if (res.status === 400) {
     const body: unknown = await res.json().catch(() => ({}));
@@ -88,6 +103,7 @@ function fileName(disposition: string | null): string {
 
 async function exportCsv(source: ExportSource): Promise<ExportFile> {
   const res = await fetch(`${base}/export${query({ ...source })}`, { credentials: "same-origin" });
+  await checkAudit(res);
   if (res.status === 401) throw new SignedOut("signed out");
   if (res.status === 413) {
     const body = s.tooMany.parse(await res.json());

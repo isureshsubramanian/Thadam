@@ -44,8 +44,9 @@ internal static class Commands
             Console.Error.WriteLine("No audit log yet.");
             return 2;
         }
-        await using var audit = await AuditLog.OpenAsync(options.AuditPath, Environment.UserName, TimeProvider.System, ct)
-            .ConfigureAwait(false);
+        await using var audit = await (options.AuditSocket is { } socket
+            ? AuditLog.OpenCollectorAsync(options.AuditPath, socket, Environment.UserName, TimeProvider.System, ct)
+            : AuditLog.OpenAsync(options.AuditPath, Environment.UserName, TimeProvider.System, ct)).ConfigureAwait(false);
         var report = await audit.VerifyAsync(ct).ConfigureAwait(false);
         if (report.Ok)
         {

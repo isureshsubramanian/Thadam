@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 //! Kernel sender identity: std's `peer_cred` is unstable in Rust 1.99
-//! (ADR-011 Decision 3). Keep the socket calls confined to this module.
+//! (ADR-011 Decision 3), and the sender's executable for the audit socket (ADR-013
+//! Decision 3). Keep these calls confined to this module.
 
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -66,6 +67,38 @@ pub fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
     })
 }
 
+/// The executable a running process was started from, as the kernel reports it.
+///
+/// The caller holds a connection from `pid` that is waiting for a reply, so the process is
+/// still alive and the pid cannot have been reused yet.
+#[cfg(target_os = "macos")]
+pub fn exe_of(pid: u32) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    // PROC_PIDPATHINFO_MAXSIZE from sys/proc_info.h.
+    const MAX: usize = 4 * 1024;
+    let pid = libc::c_int::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "pid out of range"))?;
+    let mut buf = vec![0u8; MAX];
+    // SAFETY: buf is writable for MAX bytes and the size passed says exactly that.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), MAX as u32) };
+    let n = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
+    if n == 0 || n > MAX {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buf[..n],
+    )))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn exe_of(_pid: u32) -> io::Result<std::path::PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process paths require macOS",
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn peer_of(_stream: &UnixStream) -> io::Result<Peer> {
     Err(io::Error::new(
@@ -92,5 +125,15 @@ mod tests {
         assert_eq!(peer.pid, std::process::id());
         assert_ne!(peer.pidversion, 0);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_exe_of_this_process_is_the_test_binary() {
+        let me = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(
+            exe_of(std::process::id()).unwrap().canonicalize().unwrap(),
+            me
+        );
+        assert!(exe_of(u32::MAX).is_err());
     }
 }

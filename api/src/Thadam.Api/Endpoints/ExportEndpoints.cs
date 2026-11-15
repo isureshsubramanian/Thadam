@@ -29,6 +29,8 @@ public sealed class ExportArgsValidator : AbstractValidator<ExportArgs>
 /// </summary>
 public static class ExportEndpoints
 {
+    private static readonly Action<ILogger, Exception?> AuditFailed =
+        LoggerMessage.Define(LogLevel.Warning, new EventId(21), "Export audit append unavailable");
     private static readonly string[] TooMany = ["rows"];
 
     public static void Map(RouteGroupBuilder api)
@@ -41,6 +43,7 @@ public static class ExportEndpoints
         [AsParameters] ExportArgs args, SearchRunner runner, ApiOptions options, [AsParameters] QueryEndpoints.Deps d,
         HttpContext http, CancellationToken ct)
     {
+        await d.Audit.CheckAvailableAsync(ct).ConfigureAwait(false);
         var exportId = Guid.CreateVersion7().ToString();
         Task Audit(AuditOutcome outcome) => d.Audit.AppendAsync(AuditAction.Export, exportId, outcome, CancellationToken.None);
 
@@ -87,6 +90,14 @@ public static class ExportEndpoints
         var name = await d.NamesAsync(ct).ConfigureAwait(false);
         var stamp = d.Time.GetUtcNow().ToString("yyyyMMdd'T'HHmm'Z'", CultureInfo.InvariantCulture);
         var fileName = string.Create(CultureInfo.InvariantCulture, $"thadam-export-{stamp}-s{upTo}.csv");
+        async Task EndAudit(AuditOutcome outcome)
+        {
+            try { await Audit(outcome).ConfigureAwait(false); }
+            catch (AuditUnavailableException)
+            {
+                AuditFailed(http.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Thadam.Audit"), null);
+            }
+        }
         http.Response.Headers["X-Thadam-Export-Id"] = exportId;
         return Results.Stream(async body =>
         {
@@ -106,10 +117,10 @@ public static class ExportEndpoints
             }
             catch
             {
-                await Audit(AuditOutcome.Failed).ConfigureAwait(false);
+                await EndAudit(AuditOutcome.Failed).ConfigureAwait(false);
                 throw;
             }
-            await Audit(AuditOutcome.Succeeded).ConfigureAwait(false);
+            await EndAudit(AuditOutcome.Succeeded).ConfigureAwait(false);
         }, "text/csv; charset=utf-8", fileName);
     }
 }
