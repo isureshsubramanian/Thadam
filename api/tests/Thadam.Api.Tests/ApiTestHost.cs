@@ -61,6 +61,8 @@ public sealed class ApiTestHost : IAsyncDisposable
         var webDir = Path.Combine(dataDir, "web");
         Directory.CreateDirectory(webDir);
         await File.WriteAllTextAsync(Path.Combine(webDir, "index.html"), "<!doctype html><title>test dashboard</title>", ct);
+        Directory.CreateDirectory(Path.Combine(webDir, "assets"));
+        await File.WriteAllTextAsync(Path.Combine(webDir, "assets", "index-test0001.js"), "/* synthetic */", ct);
         var options = new ApiOptions(storeFolder, Path.Combine(dataDir, "registry.json"), dataDir, 0)
         {
             AuditSocket = auditSocket,

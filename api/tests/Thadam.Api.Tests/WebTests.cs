@@ -23,6 +23,21 @@ public sealed class WebTests(StoreFixture store)
     }
 
     [Fact]
+    public async Task ThePageIsCheckedOnEveryLoadAndItsHashedScriptsAreKept()
+    {
+        // Otherwise a browser keeps an old page, and with it an old dashboard, after an update.
+        await using var host = await ApiTestHost.StartAsync(store, Ct);
+        foreach (var path in new[] { "/", "/index.html" })
+        {
+            using var page = await host.Client.GetAsync(path, Ct);
+            Assert.True(page.Headers.CacheControl?.NoCache, path);
+        }
+        using var script = await host.Client.GetAsync("/assets/index-test0001.js", Ct);
+        Assert.Equal(HttpStatusCode.OK, script.StatusCode);
+        Assert.Equal(TimeSpan.FromDays(365), script.Headers.CacheControl?.MaxAge);
+    }
+
+    [Fact]
     public async Task NoticesAreReadableWithoutSigningIn()
     {
         await using var host = await ApiTestHost.StartAsync(store, Ct);

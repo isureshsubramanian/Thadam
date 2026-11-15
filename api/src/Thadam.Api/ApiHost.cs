@@ -149,7 +149,17 @@ public static class ApiHost
         {
             var files = new PhysicalFileProvider(options.WebDir);
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
-            app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+            app.UseStaticFiles(new StaticFileOptions
+            {
+                FileProvider = files,
+                // Files under assets/ are named by content hash, so they never change. Everything
+                // else, the page above all, is checked on every load, so an installed update
+                // shows at once instead of an old page that lacks it.
+                OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl =
+                    ctx.Context.Request.Path.StartsWithSegments("/assets", StringComparison.Ordinal)
+                        ? "public, max-age=31536000, immutable"
+                        : "no-cache",
+            });
         }
         app.UseRouting();
         app.UseAuthentication();
