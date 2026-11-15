@@ -12,7 +12,9 @@ pub mod error;
 pub mod exec;
 pub mod model;
 
-pub use agent::{AGENT_SOCKET, AGENT_WIRE, AgentKind, AgentMessage, CallKind, HOOK_BIN, Reason};
+pub use agent::{
+    AGENT_SOCKET, AGENT_WIRE, AgentKind, AgentMessage, CallKind, HOOK_BIN, Reason, hook_command,
+};
 pub use catalog::{CATALOG_DOMAIN, CatalogKind, CatalogRow, catalog_hash, encode_catalog};
 pub use chain::{GENESIS, row_hash, to_hex};
 pub use detect::{Detections, Detector, DetectorKind, Redacted, Redactor};

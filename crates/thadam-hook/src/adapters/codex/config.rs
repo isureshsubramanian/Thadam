@@ -6,11 +6,7 @@ pub const PATH: &str = "/etc/codex/requirements.toml";
 const MARKER: &str = "# managed by thadam-hook; do not edit";
 
 pub fn render(hook_bin: &str) -> String {
-    let command = format!(
-        "'{}' --tool {}",
-        hook_bin.replace('\'', "'\\''"),
-        super::KEY
-    );
+    let command = thadam_core::hook_command(hook_bin, super::KEY);
     let mut encoded = String::new();
     for c in command.chars() {
         match c {

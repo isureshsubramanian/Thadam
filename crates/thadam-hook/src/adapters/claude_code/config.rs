@@ -5,13 +5,8 @@ use serde_json::{Map, Value, json};
 
 pub const PATH: &str = "/Library/Application Support/ClaudeCode/managed-settings.d/thadam.json";
 
-/// The shell command the tool runs: the hook path single-quoted (it contains a space).
 fn command(hook_bin: &str) -> String {
-    format!(
-        "'{}' --tool {}",
-        hook_bin.replace('\'', "'\\''"),
-        super::KEY
-    )
+    thadam_core::hook_command(hook_bin, super::KEY)
 }
 
 pub fn render(hook_bin: &str) -> String {

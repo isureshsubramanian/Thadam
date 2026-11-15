@@ -19,6 +19,13 @@ pub const AGENT_WIRE: &str = "thadam.agent.v1";
 pub const HOOK_BIN: &str = "/Library/Application Support/Thadam/bin/thadam-hook";
 /// The collector's agent socket (folder 0755, socket 0666, both root-owned).
 pub const AGENT_SOCKET: &str = "/var/run/thadam-agent/agent.sock";
+/// The shell command a tool's hook configuration runs: the hook path single-quoted (it
+/// contains a space), then `--tool <key>`. The adapters render it and the collector recognises
+/// the hook's own runs by it, so both sides use this one function.
+pub fn hook_command(hook_bin: &str, tool_key: &str) -> String {
+    format!("'{}' --tool {tool_key}", hook_bin.replace('\'', "'\\''"))
+}
+
 /// Longest accepted tool-side name (a tool or subagent name), in bytes. An estimate.
 pub const MAX_NAME: usize = 128;
 

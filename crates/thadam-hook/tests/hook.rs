@@ -9,11 +9,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const PROMPT: &str = r#"{"session_id":"a-1","prompt_id":"p-1","hook_event_name":"UserPromptSubmit","prompt":"hello"}"#;
+/// A well-formed payload of an event no adapter maps: read and parsed, then nothing is sent.
+const UNMAPPED: &str = r#"{"session_id":"a-1","hook_event_name":"NoSuchEvent"}"#;
 
 #[test]
 fn handle_maps_or_drops() {
     let line = thadam_hook::handle("claude_code", PROMPT.as_bytes()).unwrap();
     assert!(line.contains(r#""kind":"prompt""#));
+    assert_eq!(
+        thadam_hook::handle("claude_code", UNMAPPED.as_bytes()),
+        None
+    );
     assert_eq!(thadam_hook::handle("no_such_tool", PROMPT.as_bytes()), None);
     assert_eq!(thadam_hook::handle("claude_code", b"not json"), None);
     // A large tool output is read and dropped; the event still gets through.
@@ -86,8 +92,8 @@ fn send_delivers_one_line_and_gives_up_quietly_when_nobody_listens() {
 
 #[test]
 fn the_program_exits_0_with_no_output_and_quickly() {
-    // The real socket path is not ours to create; with or without a collector there, the
-    // program must behave the same.
+    // The program always uses the real socket path, where a live collector may listen. Only
+    // payloads that send nothing are used here; sending is tested above on a private socket.
     // The first run of a newly built file includes the OS's one-time check of it (measured
     // at about 340 ms here, 15 Nov 2026); time only later runs, as the tools see them.
     Command::new(env!("CARGO_BIN_EXE_thadam-hook"))
@@ -100,7 +106,7 @@ fn the_program_exits_0_with_no_output_and_quickly() {
         &["--tool"][..],
         &[][..],
     ] {
-        for input in [PROMPT.as_bytes(), b"garbage".as_slice()] {
+        for input in [UNMAPPED.as_bytes(), b"garbage".as_slice()] {
             let start = Instant::now();
             let mut child = Command::new(env!("CARGO_BIN_EXE_thadam-hook"))
                 .args(args)

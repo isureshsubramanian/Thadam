@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use thadam_core::{Action, Category, CoreError, DetectorKind, HOOK_BIN, NewEvent, Redactor};
+use thadam_core::{Action, Category, CoreError, DetectorKind, Flag, HOOK_BIN, NewEvent, Redactor};
 use thadam_store::SegmentStatus;
 use time::Duration;
 
@@ -219,10 +219,17 @@ impl Pipeline {
             _ => Vec::new(),
         };
         released.extend(self.pairing.advance(event.ts));
-        let record = observation
+        let mut record = observation
             .actor
             .as_ref()
             .and_then(|m| classify(&event, m, &self.registry));
+        if let Some(r) = &mut record
+            && self.agent.is_hook_run(&event, &r.tool)
+        {
+            // Thadam's own hook, run by the tool: hidden by default, never dropped.
+            r.flags.remove(&Flag::OutsideProject);
+            r.flags.insert(Flag::ToolInternal);
+        }
         if let (Some(r), Some(m)) = (&record, &observation.actor)
             && r.category == Category::Command
             && r.action == Action::Exec

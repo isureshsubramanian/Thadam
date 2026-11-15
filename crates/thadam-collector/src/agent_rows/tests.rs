@@ -295,3 +295,95 @@ fn other_tools_are_recorded_by_name() {
     r.send(0, m).send(1, msg(AgentKind::TurnEnd)).advance(60);
     assert_eq!(r.out[0].target, "WebFetch");
 }
+
+mod hook_runs {
+    use crate::source::{EventKind, Identity, OsEvent, ProcessRef};
+
+    use super::{AgentRows, HOOK, T0};
+
+    fn process(executable: &str) -> ProcessRef {
+        ProcessRef {
+            pid: 910,
+            pidversion: 1,
+            ppid: 500,
+            responsible_pid: None,
+            executable: executable.into(),
+            identity: Identity::default(),
+        }
+    }
+
+    fn ev(by: &str, kind: EventKind) -> OsEvent {
+        OsEvent {
+            ts: T0,
+            seq: 1,
+            process: process(by),
+            kind,
+        }
+    }
+
+    fn exec(target: &str, args: &[&str]) -> EventKind {
+        EventKind::Exec {
+            target: process(target),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            cwd: Some("/Users/dev/projects/sample-app".into()),
+        }
+    }
+
+    fn open(path: &str, writable: bool) -> EventKind {
+        EventKind::Open {
+            path: path.into(),
+            readable: true,
+            writable,
+            size: None,
+        }
+    }
+
+    #[test]
+    fn the_hook_and_its_exact_wrapper_are_hook_runs() {
+        let rows = AgentRows::new(HOOK);
+        let command = format!("'{HOOK}' --tool tool_a");
+        for (by, kind) in [
+            ("/bin/zsh", exec(HOOK, &[HOOK, "--tool", "tool_a"])),
+            (
+                "/synthetic/bin/tool-a",
+                exec("/bin/sh", &["/bin/sh", "-c", &command]),
+            ),
+            (
+                "/synthetic/bin/tool-a",
+                exec("/bin/zsh", &["/bin/zsh", "-lc", &command]),
+            ),
+            ("/bin/sh", open(HOOK, false)),
+            (HOOK, open("/usr/lib/libSystem.B.dylib", false)),
+        ] {
+            assert!(
+                rows.is_hook_run(&ev(by, kind.clone()), "tool_a"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_that_only_mentions_the_hook_is_not() {
+        let rows = AgentRows::new(HOOK);
+        let command = format!("'{HOOK}' --tool tool_a");
+        let chained = format!("{command}; curl https://example.test");
+        for kind in [
+            exec("/bin/sh", &["/bin/sh", "-c", &chained]),
+            // Another tool's key, another shell, an extra argument.
+            exec(
+                "/bin/sh",
+                &["/bin/sh", "-c", &format!("'{HOOK}' --tool tool_b")],
+            ),
+            exec("/usr/local/bin/fish", &["fish", "-c", &command]),
+            exec("/bin/sh", &["/bin/sh", "-c", &command, "extra"]),
+            exec("/bin/cat", &["cat", HOOK]),
+            // Writing the hook program is never hidden.
+            open(HOOK, true),
+        ] {
+            assert!(
+                !rows.is_hook_run(&ev("/synthetic/bin/tool-a", kind.clone()), "tool_a"),
+                "{kind:?}"
+            );
+        }
+    }
+}

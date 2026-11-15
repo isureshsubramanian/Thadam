@@ -1284,6 +1284,17 @@ fn agent_messages_from_the_hook_become_rows_of_its_session() {
     if Path::new("/usr/bin/nc").exists() {
         assert!(stderr.contains("agent_refused=1"), "{stderr}");
     }
+    // The hook's own run is kept, marked internal (hidden by default in the dashboard).
+    let db = Store::open_read_only(only_segment(&store).unwrap()).unwrap();
+    let hook_flags: String = db
+        .connection()
+        .query_row(
+            "SELECT flags FROM events WHERE source = 'os' AND target = 'hook'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(hook_flags, "tool_internal");
     let verify = verify_dir(&store).unwrap();
     assert_eq!(verify.broken, None);
 }

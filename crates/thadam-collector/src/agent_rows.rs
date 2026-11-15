@@ -18,7 +18,11 @@ use thadam_core::{
 use time::{Duration, OffsetDateTime};
 
 use crate::source::agent::Peer;
+use crate::source::{EventKind, OsEvent};
 use crate::tree::Membership;
+
+/// Shells a tool may start the hook command with.
+const HOOK_SHELLS: &[&str] = &["/bin/sh", "/bin/zsh", "/bin/bash"];
 
 /// After a turn ends, how long a call's late result may still arrive: each hook event is
 /// its own process, so a result sent just before the turn's end can be read just after it.
@@ -122,6 +126,36 @@ impl AgentRows {
             sessions: HashMap::new(),
             execs: HashMap::new(),
             stats: AgentStats::default(),
+        }
+    }
+
+    /// Whether an OS event is part of a run of the installed hook in a `tool_key` session:
+    /// the hook process itself, the shell that runs exactly the configured hook command,
+    /// or a read of the hook program. Its rows are marked tool-internal, not dropped.
+    ///
+    /// The shell must run that command and nothing else, so a command line that only
+    /// mentions the hook (`'<hook>' --tool x; other`) is never hidden.
+    pub fn is_hook_run(&self, event: &OsEvent, tool_key: &str) -> bool {
+        let hook = &*self.hook_bin;
+        if event.process.executable == hook {
+            return true;
+        }
+        match &event.kind {
+            EventKind::Exec { target, args, .. } => {
+                target.executable == hook
+                    || (HOOK_SHELLS.contains(&target.executable.as_str())
+                        && matches!(args.as_slice(),
+                            [_, flag, command]
+                                if (flag == "-c" || flag == "-lc")
+                                    && *command == thadam_core::hook_command(hook, tool_key)))
+            }
+            EventKind::Open {
+                path,
+                readable: true,
+                writable: false,
+                ..
+            } => path == hook,
+            _ => false,
         }
     }
 
