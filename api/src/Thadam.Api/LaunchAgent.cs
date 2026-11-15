@@ -78,6 +78,11 @@ internal static class LaunchAgent
         }
         // A reinstall replaces the running agent; "not loaded" is not an error here.
         await LaunchctlAsync(["bootout", $"{domain}/{Label}"], ct).ConfigureAwait(false);
+        if (!await GoneAsync(domain, ct).ConfigureAwait(false))
+        {
+            Console.Error.WriteLine("The running agent did not stop; run install again.");
+            return 2;
+        }
         if (await LaunchctlAsync(["bootstrap", domain, PlistPath], ct).ConfigureAwait(false) != 0)
         {
             Console.Error.WriteLine("launchctl did not load the agent; see the system log.");
@@ -98,6 +103,31 @@ internal static class LaunchAgent
         File.Delete(PlistPath);
         Console.WriteLine("Removed the launch agent. The password, audit log, search index and logs are kept.");
         return 0;
+    }
+
+    /// <summary>
+    /// Longest wait for a booted-out agent to leave launchd (estimate: the old API stopped in
+    /// 40 ms on 15 Nov 2026; this allows for a slow shutdown).
+    /// </summary>
+    private static readonly TimeSpan StopWait = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// <c>bootout</c> returns before the service is removed; a <c>bootstrap</c> in that window is
+    /// refused ("37: Operation already in progress", shown as "5: Input/output error"; seen live
+    /// 15 Nov 2026). Waits until launchd no longer lists the agent. False on timeout.
+    /// </summary>
+    private static async Task<bool> GoneAsync(string domain, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow + StopWait;
+        while (await LaunchctlAsync(["print", $"{domain}/{Label}"], ct).ConfigureAwait(false) == 0)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                return false;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(100), ct).ConfigureAwait(false);
+        }
+        return true;
     }
 
     private static XElement Key(string name) => new("key", name);
