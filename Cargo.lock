@@ -518,6 +518,7 @@ name = "thadam-collector"
 version = "0.1.0"
 dependencies = [
  "garde",
+ "libc",
  "serde",
  "serde_json",
  "signal-hook",

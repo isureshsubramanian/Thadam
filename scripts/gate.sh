@@ -10,6 +10,12 @@ step() { printf '\n== %s\n' "$1"; }
 step "format"
 cargo fmt --all -- --check
 
+step "unsafe allowance confined to peer.rs"
+if find crates -name '*.rs' ! -path 'crates/thadam-collector/src/peer.rs' -exec grep -nEH 'allow[[:space:]]*\([[:space:]]*unsafe_code[[:space:]]*\)' {} +; then
+    echo "unsafe_code allowance outside peer.rs"
+    exit 1
+fi
+
 step "clippy (unwrap/expect denied outside tests)"
 cargo clippy --workspace --all-targets -- -D warnings
 

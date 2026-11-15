@@ -72,6 +72,14 @@ pub enum RegistryError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ToolId(usize);
 
+impl ToolId {
+    /// A tool index for tests of modules that only carry it.
+    #[cfg(test)]
+    pub(crate) fn for_tests(i: usize) -> Self {
+        Self(i)
+    }
+}
+
 /// A path prefix. `~/` stands for any user's home folder, because the collector runs as
 /// root and serves every user on the Mac.
 #[derive(Debug, Clone, PartialEq, Eq)]

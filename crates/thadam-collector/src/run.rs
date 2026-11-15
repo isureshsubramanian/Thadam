@@ -3,7 +3,8 @@
 //! ```text
 //! OS source   ─▶ [reader thread] ──┐
 //!                                  ├─items─▶ [this thread: pipeline + redaction] ─records─▶ [writer thread: store]
-//! flow socket ─▶ [listener threads]┘
+//! flow socket ─▶ [listener threads]┤
+//! agent socket ▶ [listener threads]┘
 //! ```
 //!
 //! One pipeline thread owns the process tree, so OS events and network flows need no lock
@@ -25,6 +26,7 @@ use thadam_store::{SegmentStatus, SegmentWriter, StoreError, Written};
 use thiserror::Error;
 
 use crate::pipeline::{Pipeline, Stats};
+use crate::source::agent::{AgentItem, AgentListener};
 use crate::source::network::{FlowItem, FlowListener};
 use crate::source::{EventSource, SourceItem};
 
@@ -65,6 +67,7 @@ enum Input {
     /// open for as long as the process runs.
     OsEnd,
     Net(FlowItem),
+    Agent(AgentItem),
 }
 
 /// How a run ended.
@@ -112,11 +115,12 @@ pub fn spawn_logger() -> std::io::Result<(Child, BufReader<ChildStdout>)> {
 /// happen while the snapshot is taken are buffered, not lost (see `snapshot.rs`).
 /// `on_stop` runs once when a stop is first seen; for the live logger it ends the child,
 /// which closes the pipe so the remaining output drains. `flows`, when given, is served
-/// for the whole run.
+/// for the whole run, and so is `agents` (ADR-011).
 #[allow(clippy::too_many_arguments)]
 pub fn run<S>(
     source: S,
     flows: Option<FlowListener>,
+    agents: Option<AgentListener>,
     pipeline: &mut Pipeline,
     store: SegmentWriter,
     stop: &AtomicBool,
@@ -134,6 +138,12 @@ where
         let tx = item_tx.clone();
         // Not joined either: it waits in accept for as long as the process runs.
         std::thread::spawn(move || listener.serve(move |item| tx.send(Input::Net(item)).is_ok()));
+    }
+    if let Some(listener) = agents {
+        pipeline.enable_agent();
+        let tx = item_tx.clone();
+        // Not joined, as the flow listener.
+        std::thread::spawn(move || listener.serve(move |item| tx.send(Input::Agent(item)).is_ok()));
     }
     // Not joined: a reader blocked on a quiet input must not hold up shutdown.
     std::thread::spawn(move || read_all(source, &item_tx));
@@ -283,6 +293,9 @@ fn process(
         match items.recv_timeout(POLL) {
             Ok(Input::Os(Ok(item))) => send(pipeline.handle(item), pipeline, redactor, records)?,
             Ok(Input::Net(item)) => send(pipeline.handle_flow(item), pipeline, redactor, records)?,
+            Ok(Input::Agent(item)) => {
+                send(pipeline.handle_agent(item), pipeline, redactor, records)?;
+            }
             Ok(Input::Os(Err(e))) => {
                 send(pipeline.finish(), pipeline, redactor, records)?;
                 return Err(RunError::Source(e));

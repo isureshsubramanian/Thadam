@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use crate::adapters::{self, HookConfig};
 
-pub const HOOK_BIN: &str = "/Library/Application Support/Thadam/bin/thadam-hook";
+pub use thadam_core::HOOK_BIN;
 
 struct Targets<'a> {
     bin: PathBuf,

@@ -4,6 +4,7 @@
 //! by a native Endpoint Security client without touching the tree, classifier or store.
 //! `OsEvent` has no environment field: the exec environment never becomes a value here.
 
+pub mod agent;
 pub mod eslogger;
 pub mod network;
 

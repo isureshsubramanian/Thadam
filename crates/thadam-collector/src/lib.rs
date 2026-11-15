@@ -1,11 +1,13 @@
 //! Thadam collector (ADR-003): reads OS events, keeps those from AI tool process trees,
 //! turns them into records and appends them to the store.
 
+pub mod agent_rows;
 pub mod classify;
 pub mod collapse;
 pub mod diag;
 pub mod netflow;
 pub mod pairing;
+pub mod peer;
 pub mod pipeline;
 pub mod registry;
 pub mod rollup;

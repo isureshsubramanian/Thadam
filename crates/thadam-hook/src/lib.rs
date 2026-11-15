@@ -41,11 +41,23 @@ pub fn read_payload(input: impl Read) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Sends one line; any failure (collector down, slow, refused) loses the line silently.
+/// Sends one line, then waits for the collector's one-byte acknowledgement before closing.
+/// Any failure (collector down, slow, refused) loses the line silently.
+///
+/// ORDERING (the other side is `AgentListener::serve` in the collector): the collector asks
+/// the kernel who is connected before it acknowledges, so this process must still be
+/// connected then; closing straight after writing could make the line unattributable.
 pub fn send(socket: &Path, line: &str) -> Option<()> {
+    let started = std::time::Instant::now();
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_write_timeout(Some(SEND_BUDGET)).ok()?;
     stream.write_all(line.as_bytes()).ok()?;
     stream.write_all(b"\n").ok()?;
-    stream.flush().ok()
+    stream.flush().ok()?;
+    let left = SEND_BUDGET.checked_sub(started.elapsed())?;
+    stream
+        .set_read_timeout(Some(left.max(Duration::from_millis(1))))
+        .ok()?;
+    let mut ack = [0u8; 1];
+    stream.read_exact(&mut ack).ok()
 }

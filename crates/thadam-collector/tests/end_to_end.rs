@@ -50,13 +50,17 @@ impl Drop for TempDir {
 
 /// A process object in the logger's shape.
 fn process(pid: u32, ppid: u32, exe: &str, signed: bool) -> String {
+    process_v(pid, 1, ppid, exe, signed)
+}
+
+fn process_v(pid: u32, pidversion: u32, ppid: u32, exe: &str, signed: bool) -> String {
     let identity = if signed {
         r#""team_id":"TEAM000001","signing_id":"com.example.cli-agent""#
     } else {
         r#""team_id":"","signing_id":"com.example.other""#
     };
     format!(
-        r#"{{"audit_token":{{"pid":{pid},"pidversion":1,"euid":501}},"ppid":{ppid},"original_ppid":{ppid},"responsible_audit_token":{{"pid":{pid},"pidversion":1}},"executable":{{"path":"{exe}","path_truncated":false}},{identity},"is_platform_binary":false,"start_time":"2026-11-14T09:30:00.000000Z"}}"#
+        r#"{{"audit_token":{{"pid":{pid},"pidversion":{pidversion},"euid":501}},"ppid":{ppid},"original_ppid":{ppid},"responsible_audit_token":{{"pid":{pid},"pidversion":{pidversion}}},"executable":{{"path":"{exe}","path_truncated":false}},{identity},"is_platform_binary":false,"start_time":"2026-11-14T09:30:00.000000Z"}}"#
     )
 }
 
@@ -1095,4 +1099,191 @@ fn diagnostics_go_to_the_log_file_when_given() {
         last.as_bytes().get(19) == Some(&b'Z'),
         "UTC stamp first: {last}"
     );
+}
+
+/// One `thadam.agent.v1` line sent as the hook does: write, then wait for the acknowledgement.
+fn send_agent(socket: &Path, line: &str) {
+    let mut c = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    c.write_all(format!("{line}\n").as_bytes()).unwrap();
+    c.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut ack = [0u8; 1];
+    std::io::Read::read_exact(&mut c, &mut ack).unwrap();
+}
+
+#[test]
+fn agent_messages_from_the_hook_become_rows_of_its_session() {
+    // This test process plays the hook: the OS stream says the tool started it, and the
+    // collector is told the hook program is this test binary. Its pid and pidversion come
+    // from the kernel, as the collector will read them.
+    let me = {
+        let dir = std::env::temp_dir().join(format!("tp-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let l = std::os::unix::net::UnixListener::bind(dir.join("p.sock")).unwrap();
+        let _c = std::os::unix::net::UnixStream::connect(dir.join("p.sock")).unwrap();
+        let (s, _) = l.accept().unwrap();
+        let peer = thadam_collector::peer::peer_of(&s).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        peer
+    };
+    let exe = std::env::current_exe().unwrap();
+    let exe = exe.to_str().unwrap();
+    let dir = TempDir::new("agent");
+    let socket = dir.path("a").join("a.sock");
+    let store = dir.path("store");
+    let mut child = Command::new(BIN)
+        .args(["run", "--source", "stdin", "--registry"])
+        .arg(dir.path("registry.json"))
+        .arg("--store")
+        .arg(&store)
+        .arg("--agent-socket")
+        .arg(&socket)
+        .args(["--hook-bin", exe])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "socket never appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let session = r#""agent_session_id":"a-51c2","transcript":"/Users/test/.cli-agent/a-51c2.jsonl","turn":"p-1""#;
+    let call = r#""input_hash":"0000000000000000000000000000000000000000000000000000000000000001","tool_name":"Shell","call_kind":"shell","text":"rm -rf build/""#;
+    for line in [
+        format!(
+            r#"{{"v":"thadam.agent.v1","tool":"claimed","kind":"prompt",{session},"text":"mail dev@example.test the key sk-ant-SYNTHETICSYNTHETICSYNTHETIC0000"}}"#
+        ),
+        format!(
+            r#"{{"v":"thadam.agent.v1","tool":"claimed","kind":"permission_request",{session},{call}}}"#
+        ),
+        format!(
+            r#"{{"v":"thadam.agent.v1","tool":"claimed","kind":"call_start",{session},"call":"c-1",{call}}}"#
+        ),
+    ] {
+        send_agent(&socket, &line);
+    }
+    // Another program in no session at all: written nowhere.
+    if Path::new("/usr/bin/nc").exists() {
+        let mut nc = Command::new("/usr/bin/nc")
+            .args(["-U", socket.to_str().unwrap()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        nc.stdin
+            .take()
+            .unwrap()
+            .write_all(
+                format!(r#"{{"v":"thadam.agent.v1","tool":"cli_agent","kind":"prompt",{session},"text":"FORGED"}}"#)
+                    .as_bytes(),
+            )
+            .unwrap();
+        let _ = nc.wait();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let root = process(4100, 1, "/Users/test/.local/bin/2.4.1", true);
+    let stream = [
+        line(
+            1,
+            0,
+            &process(4100, 1, "/bin/zsh", false),
+            "exec",
+            &format!(
+                r#"{{"target":{root},"args":["agent"],"env":[],"cwd":{}}}"#,
+                file("/Users/test/projects/demo")
+            ),
+        ),
+        line(
+            2,
+            1,
+            &root,
+            "fork",
+            &format!(
+                r#"{{"child":{}}}"#,
+                process_v(me.pid, me.pidversion, 4100, "/bin/sh", false)
+            ),
+        ),
+        line(
+            3,
+            1,
+            &process_v(me.pid, me.pidversion, 4100, "/bin/sh", false),
+            "exec",
+            &format!(
+                r#"{{"target":{},"args":["hook"],"env":[],"cwd":{}}}"#,
+                process_v(me.pid, me.pidversion, 4100, exe, false),
+                file("/Users/test/projects/demo")
+            ),
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+
+    let mut agent_rows = Vec::new();
+    for entry in std::fs::read_dir(&store).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.starts_with("events-") && name.ends_with(".db")) {
+            continue;
+        }
+        let db = Store::open_read_only(&path).unwrap();
+        let mut stmt = db
+            .connection()
+            .prepare(
+                "SELECT tool, category, outcome, target, flags, detections, agent_session_id, transcript
+                 FROM events WHERE source = 'agent' ORDER BY seq",
+            )
+            .unwrap();
+        agent_rows.extend(
+            stmt.query_map([], |r| {
+                Ok((0..8)
+                    .map(|i| r.get::<_, Option<String>>(i).unwrap().unwrap_or_default())
+                    .collect::<Vec<_>>())
+            })
+            .unwrap()
+            .map(Result::unwrap),
+        );
+    }
+    assert_eq!(agent_rows.len(), 2, "{agent_rows:?}\n{stderr}");
+    let prompt = &agent_rows[0];
+    // Joined to the sender's session and tool, whatever the message claimed.
+    assert_eq!(prompt[0], "cli_agent");
+    assert_eq!(prompt[1], "prompt");
+    assert!(
+        prompt[3].contains("[EMAIL]") && !prompt[3].contains("dev@example.test"),
+        "{}",
+        prompt[3]
+    );
+    assert!(!prompt[3].contains("SYNTHETICSYNTHETIC"), "{}", prompt[3]);
+    assert_eq!(prompt[6], "a-51c2");
+    assert_eq!(prompt[7], "/Users/test/.cli-agent/a-51c2.jsonl");
+    let decline = &agent_rows[1];
+    assert_eq!(decline[1], "command");
+    assert_eq!(decline[2], "denied_by_user");
+    assert_eq!(decline[3], "rm -rf build/");
+    assert!(decline[4].contains("unconfirmed"));
+    assert!(!db_files_contain(&dir, "FORGED"));
+    assert!(stderr.contains("agent_kept=3"), "{stderr}");
+    if Path::new("/usr/bin/nc").exists() {
+        assert!(stderr.contains("agent_refused=1"), "{stderr}");
+    }
+    let verify = verify_dir(&store).unwrap();
+    assert_eq!(verify.broken, None);
 }

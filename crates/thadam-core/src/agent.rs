@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::model::{MAX_PATH, MAX_SESSION_ID, MAX_TARGET_INPUT, MAX_TOOL_KEY};
 
 pub const AGENT_WIRE: &str = "thadam.agent.v1";
+/// Where `thadam-hook install-hooks` puts the hook program, beside the collector. The
+/// collector accepts agent messages only from a process running this file.
+pub const HOOK_BIN: &str = "/Library/Application Support/Thadam/bin/thadam-hook";
 /// The collector's agent socket (folder 0755, socket 0666, both root-owned).
 pub const AGENT_SOCKET: &str = "/var/run/thadam-agent/agent.sock";
 /// Longest accepted tool-side name (a tool or subagent name), in bytes. An estimate.

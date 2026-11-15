@@ -228,6 +228,11 @@ impl ProcessTree {
             .map(|e| (e.membership.clone(), None))
     }
 
+    /// The running image of a member process, once an event has named it.
+    pub fn executable(&self, pid: u32) -> Option<Arc<str>> {
+        self.members.get(&pid).and_then(|e| e.executable.clone())
+    }
+
     fn insert(&mut self, pid: u32, pidversion: u32, membership: Membership, executable: &str) {
         self.members.insert(
             pid,

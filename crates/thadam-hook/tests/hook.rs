@@ -47,12 +47,38 @@ fn send_delivers_one_line_and_gives_up_quietly_when_nobody_listens() {
     let path = dir.join("agent.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let line = thadam_hook::handle("claude_code", PROMPT.as_bytes()).unwrap();
+    // A collector that acknowledges, as the real one does once it knows the sender.
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"\n").unwrap();
+        let mut got = String::new();
+        BufReader::new(stream).read_line(&mut got).unwrap();
+        (got, listener)
+    });
     thadam_hook::send(&path, &line).unwrap();
-    let (stream, _) = listener.accept().unwrap();
-    let mut got = String::new();
-    BufReader::new(stream).read_line(&mut got).unwrap();
+    let (got, listener) = server.join().unwrap();
     assert_eq!(got.trim_end(), line);
+    // One that never acknowledges: the hook gives up within its budget.
+    let silent = std::thread::spawn({
+        let path = path.clone();
+        move || {
+            let _ = std::fs::remove_file(&path);
+            let l = UnixListener::bind(&path).unwrap();
+            let (s, _) = l.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            drop(s);
+        }
+    });
     drop(listener);
+    std::thread::sleep(Duration::from_millis(50));
+    let start = Instant::now();
+    assert_eq!(thadam_hook::send(&path, &line), None);
+    assert!(
+        start.elapsed() < Duration::from_millis(350),
+        "{:?}",
+        start.elapsed()
+    );
+    silent.join().unwrap();
     std::fs::remove_file(&path).unwrap();
     assert_eq!(thadam_hook::send(&path, &line), None);
     std::fs::remove_dir_all(&dir).unwrap();

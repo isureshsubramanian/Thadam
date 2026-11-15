@@ -1,0 +1,377 @@
+//! Agent messages attributed to the kernel-reported sender (ADR-011 Decision 3).
+
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::peer::peer_of;
+use garde::Validate;
+
+/// JSON overhead allowance is an estimate.
+const MAX_LINE: usize = thadam_core::model::MAX_TARGET_INPUT + 64 * 1024;
+/// The hook sends one line; these connection budgets are estimates.
+const MAX_LINES: usize = 16;
+const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+use thadam_core::AgentMessage;
+use time::OffsetDateTime;
+
+/// The sending process, from the socket itself (never from the message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer {
+    pub pid: u32,
+    pub pidversion: u32,
+}
+
+/// Why a line was not accepted. Counts only, for the stats line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentReject {
+    /// The socket could not say who sent it.
+    NoPeer,
+    TooLong,
+    /// Not UTF-8, not JSON, or not a `thadam.agent.v1` message.
+    Malformed,
+    /// A valid message whose fields fail validation.
+    Invalid,
+}
+
+impl AgentReject {
+    pub fn name(self) -> &'static str {
+        match self {
+            AgentReject::NoPeer => "no_peer",
+            AgentReject::TooLong => "too_long",
+            AgentReject::Malformed => "malformed",
+            AgentReject::Invalid => "invalid",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentItem {
+    Message {
+        peer: Peer,
+        /// When the collector read the line (UTC).
+        received: OffsetDateTime,
+        message: Box<AgentMessage>,
+    },
+    Rejected(AgentReject),
+}
+
+#[derive(Debug)]
+pub struct AgentListener {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+impl AgentListener {
+    pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let dir = path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "agent socket needs a folder")
+            })?;
+        if !dir.exists() {
+            DirBuilder::new().recursive(true).mode(0o755).create(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+        }
+        let meta = fs::symlink_metadata(dir)?;
+        if !meta.is_dir() || meta.permissions().mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "agent socket folder must not be writable by others",
+            ));
+        }
+        // A newly created file has our effective uid, without a second unsafe interface.
+        let probe = dir.join(format!(".owner-{}", uuid::Uuid::now_v7()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)?;
+        let owner = file.metadata().map(|m| m.uid());
+        fs::remove_file(&probe)?;
+        if meta.uid() != owner? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "agent socket folder must be owned by this process",
+            ));
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_socket() => fs::remove_file(&path)?,
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "agent socket path exists and is not a socket",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let listener = UnixListener::bind(&path)?;
+        let bound = Self { listener, path };
+        fs::set_permissions(&bound.path, fs::Permissions::from_mode(0o666))?;
+        Ok(bound)
+    }
+
+    pub fn serve<F>(self, send: F)
+    where
+        F: Fn(AgentItem) -> bool + Clone + Send + 'static,
+    {
+        for stream in self.listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            // ORDERING (the other side is `thadam_hook::send`): the sender's identity is read
+            // while it waits for the acknowledgement below, so it is still connected. A
+            // sender that writes and closes at once could be gone before the kernel is asked.
+            let peer = match peer_of(&stream) {
+                Ok(peer) => peer,
+                Err(_) => {
+                    if !send(AgentItem::Rejected(AgentReject::NoPeer)) {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let send = send.clone();
+            std::thread::spawn(move || {
+                // The acknowledgement: one byte, after the identity is known.
+                if (&stream).write_all(&[ACK]).is_ok() {
+                    read_connection(stream, peer, &send);
+                }
+            });
+        }
+    }
+}
+
+impl Drop for AgentListener {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Sent once the sender's identity has been read (see `serve`).
+pub const ACK: u8 = b'\n';
+
+fn read_connection(stream: UnixStream, peer: Peer, send: &impl Fn(AgentItem) -> bool) {
+    if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
+        return;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    for _ in 0..MAX_LINES {
+        let item = match read_line_limited(&mut reader, &mut buf, MAX_LINE) {
+            Ok(Line::End) | Err(_) => return,
+            Ok(Line::TooLong) => AgentItem::Rejected(AgentReject::TooLong),
+            Ok(Line::Done) => match std::str::from_utf8(&buf) {
+                Ok(text) if text.trim().is_empty() => continue,
+                Ok(text) => match serde_json::from_str::<AgentMessage>(text) {
+                    Err(_) => AgentItem::Rejected(AgentReject::Malformed),
+                    Ok(message) if message.validate().is_err() => {
+                        AgentItem::Rejected(AgentReject::Invalid)
+                    }
+                    Ok(message) => AgentItem::Message {
+                        peer,
+                        received: OffsetDateTime::now_utc(),
+                        message: Box::new(message),
+                    },
+                },
+                Err(_) => AgentItem::Rejected(AgentReject::Malformed),
+            },
+        };
+        if !send(item) {
+            return;
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    /// A line is in the buffer, without its newline.
+    Done,
+    /// A line over the limit was read and thrown away.
+    TooLong,
+    End,
+}
+
+/// Reads one line into `buf`, keeping at most `max` bytes in memory however long it is.
+fn read_line_limited(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -> io::Result<Line> {
+    buf.clear();
+    let mut too_long = false;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(match (too_long, buf.is_empty()) {
+                (true, _) => Line::TooLong,
+                (false, true) => Line::End,
+                // A last line without a newline still counts.
+                (false, false) => Line::Done,
+            });
+        }
+        let (part, found) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (&chunk[..i], Some(i + 1)),
+            None => (chunk, None),
+        };
+        if !too_long {
+            if buf.len() + part.len() > max {
+                too_long = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(part);
+            }
+        }
+        let used = found.unwrap_or(chunk.len());
+        reader.consume(used);
+        if found.is_some() {
+            return Ok(if too_long { Line::TooLong } else { Line::Done });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+
+    fn folder() -> PathBuf {
+        std::env::temp_dir().join(format!("ta-{:08x}", uuid::Uuid::now_v7().as_u128() as u32))
+    }
+
+    #[test]
+    fn bind_permissions_and_cleanup() {
+        let dir = folder();
+        let path = dir.join("agent.sock");
+        let listener = AgentListener::bind(&path).unwrap();
+        assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o666);
+        drop(listener);
+        assert!(!path.exists());
+        let stale = UnixListener::bind(&path).unwrap();
+        drop(stale);
+        drop(AgentListener::bind(&path).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refuses_writable_folder_and_plain_file() {
+        let dir = folder();
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("agent.sock");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            AgentListener::bind(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, b"keep").unwrap();
+        assert_eq!(
+            AgentListener::bind(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn messages_and_rejections() {
+        let dir = folder();
+        let path = dir.join("agent.sock");
+        let listener = AgentListener::bind(&path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || listener.serve(move |item| tx.send(item).is_ok()));
+        let message =
+            AgentMessage::new("tool-a", thadam_core::agent::AgentKind::Prompt, "session-1");
+        let valid = serde_json::to_string(&message).unwrap();
+        let cases = [
+            (b"garbage".to_vec(), AgentReject::Malformed),
+            (vec![0xff], AgentReject::Malformed),
+            (
+                valid
+                    .replace("thadam.agent.v1", "thadam.agent.v0")
+                    .into_bytes(),
+                AgentReject::Invalid,
+            ),
+            (
+                valid.replace("session-1", "").into_bytes(),
+                AgentReject::Invalid,
+            ),
+            (
+                valid.replace('}', ",\"unknown\":1}").into_bytes(),
+                AgentReject::Malformed,
+            ),
+            (vec![b'x'; MAX_LINE + 1], AgentReject::TooLong),
+        ];
+        let mut client = UnixStream::connect(&path).unwrap();
+        writeln!(client, "{valid}").unwrap();
+        wait_ack(&mut client);
+        let item = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let AgentItem::Message {
+            peer, message: got, ..
+        } = item
+        else {
+            panic!("missing message")
+        };
+        assert_eq!(peer.pid, std::process::id());
+        assert_ne!(peer.pidversion, 0);
+        assert_eq!(*got, message);
+        drop(client);
+        for (line, reason) in cases {
+            let mut client = UnixStream::connect(&path).unwrap();
+            client.write_all(&line).unwrap();
+            client.write_all(b"\n").unwrap();
+            // As the hook does: wait for the acknowledgement, then close.
+            wait_ack(&mut client);
+            drop(client);
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                AgentItem::Rejected(reason)
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn wait_ack(client: &mut UnixStream) {
+        let mut ack = [0u8; 1];
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        std::io::Read::read_exact(client, &mut ack).unwrap();
+        assert_eq!(ack[0], ACK);
+    }
+
+    #[test]
+    fn idle_connection_times_out_while_another_is_read() {
+        let dir = folder();
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("agent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut idle = UnixStream::connect(&path).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let peer = Peer {
+            pid: std::process::id(),
+            pidversion: 1,
+        };
+        let worker = std::thread::spawn(move || read_connection(stream, peer, &|_| true));
+        let mut active = UnixStream::connect(&path).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let other = std::thread::spawn(move || {
+            read_connection(stream, peer, &|item| tx.send(item).is_ok())
+        });
+        writeln!(active, "garbage").unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AgentItem::Rejected(AgentReject::Malformed)
+        );
+        drop(active);
+        idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(idle.read(&mut [0]).unwrap(), 0);
+        worker.join().unwrap();
+        other.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

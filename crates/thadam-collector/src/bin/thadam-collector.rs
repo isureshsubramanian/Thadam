@@ -21,6 +21,7 @@ use thadam_collector::registry::Registry;
 use thadam_collector::run::{Ended, run, spawn_logger};
 use thadam_collector::service;
 use thadam_collector::snapshot::{self, SystemProcessTable};
+use thadam_collector::source::agent::AgentListener;
 use thadam_collector::source::eslogger::EsloggerSource;
 use thadam_collector::source::network::{DEFAULT_SOCKET, FlowListener};
 use thadam_store::{SegmentWriter, SystemDisk};
@@ -28,6 +29,9 @@ use thadam_store::{SegmentWriter, SystemDisk};
 const USAGE: &str = "usage:
   thadam-collector run --registry <file> --store <folder> [--source eslogger|stdin] [--window-secs <n>]
                        [--flow-socket <path>|off]   (default: the system path with eslogger, off with stdin)
+                       [--agent-socket <path>|off]  (default: as --flow-socket)
+                       [--hook-bin <path>]          (the program agent messages must come from;
+                                                     default: the installed thadam-hook)
                        [--log <file>]               (default: stderr; the file rotates at 1 MB, 5 kept)
   thadam-collector check-registry <file>
   thadam-collector snapshot --registry <file>
@@ -73,6 +77,8 @@ struct Options {
     source: Option<String>,
     window_secs: Option<String>,
     flow_socket: Option<String>,
+    agent_socket: Option<String>,
+    hook_bin: Option<String>,
     log: Option<String>,
 }
 
@@ -86,6 +92,8 @@ fn parse_options(args: &[String]) -> Result<Options, Failure> {
             "--source" => &mut o.source,
             "--window-secs" => &mut o.window_secs,
             "--flow-socket" => &mut o.flow_socket,
+            "--agent-socket" => &mut o.agent_socket,
+            "--hook-bin" => &mut o.hook_bin,
             "--log" => &mut o.log,
             _ => return Err(Failure::Usage(USAGE.to_string())),
         };
@@ -179,6 +187,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
     }
     let source = o.source.as_deref().unwrap_or("eslogger");
     let flows = open_flow_socket(o.flow_socket.as_deref(), source)?;
+    let agents = open_agent_socket(o.agent_socket.as_deref(), source)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut signals =
@@ -194,6 +203,9 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
 
     let mut pipeline =
         Pipeline::new(registry, settings).map_err(|e| Failure::Runtime(e.to_string()))?;
+    if let Some(bin) = o.hook_bin.as_deref() {
+        pipeline.set_hook_bin(bin);
+    }
     let (ended, stats) = match source {
         "eslogger" => {
             let (child, stdout) = spawn_logger()
@@ -203,6 +215,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
             let result = run(
                 EsloggerSource::new(stdout),
                 flows,
+                agents,
                 &mut pipeline,
                 store,
                 &stop,
@@ -223,6 +236,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         "stdin" => run(
             EsloggerSource::new(BufReader::new(std::io::stdin())),
             flows,
+            agents,
             &mut pipeline,
             store,
             &stop,
@@ -249,7 +263,13 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
 /// root the first write fails.
 fn cmd_install(args: &[String]) -> Result<(), Failure> {
     let o = parse_options(args)?;
-    if o.source.is_some() || o.window_secs.is_some() || o.flow_socket.is_some() || o.log.is_some() {
+    if o.source.is_some()
+        || o.window_secs.is_some()
+        || o.flow_socket.is_some()
+        || o.agent_socket.is_some()
+        || o.hook_bin.is_some()
+        || o.log.is_some()
+    {
         return Err(Failure::Usage(USAGE.to_string()));
     }
     let registry = o.registry.as_deref().unwrap_or(service::DEFAULT_REGISTRY);
@@ -376,6 +396,23 @@ fn open_flow_socket(arg: Option<&str>, source: &str) -> Result<Option<FlowListen
             Ok(l) => Ok(Some(l)),
             Err(e) => {
                 diag!("thadam-collector: network flows not recorded, cannot listen: {e}");
+                Ok(None)
+            }
+        },
+    }
+}
+
+/// The agent socket (ADR-011), on the same terms as the flow socket.
+fn open_agent_socket(arg: Option<&str>, source: &str) -> Result<Option<AgentListener>, Failure> {
+    match (arg, source) {
+        (Some("off"), _) | (None, "stdin") => Ok(None),
+        (Some(path), _) => AgentListener::bind(path)
+            .map(Some)
+            .map_err(|e| Failure::Usage(format!("cannot listen for agent messages: {e}"))),
+        (None, _) => match AgentListener::bind(thadam_core::AGENT_SOCKET) {
+            Ok(l) => Ok(Some(l)),
+            Err(e) => {
+                diag!("thadam-collector: agent messages not recorded, cannot listen: {e}");
                 Ok(None)
             }
         },
