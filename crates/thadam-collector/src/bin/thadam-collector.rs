@@ -496,12 +496,14 @@ fn cmd_import_audit(args: &[String]) -> Result<(), Failure> {
 }
 
 fn seed_from_snapshot(pipeline: &mut Pipeline) {
+    let started = std::time::Instant::now();
     match snapshot::take(&SystemProcessTable, pipeline.registry()) {
         Ok(snap) => {
             diag!(
-                "thadam-collector: snapshot found {} session roots, {} member processes",
+                "thadam-collector: snapshot found {} session roots, {} member processes in {} ms",
                 snap.roots.len(),
-                snap.members.len()
+                snap.members.len(),
+                started.elapsed().as_millis()
             );
             pipeline.seed(&snap);
         }

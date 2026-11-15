@@ -337,6 +337,9 @@ fn sample_stream_produces_the_adr_rows() {
 
     // Diagnostics: counts only, never paths or values.
     assert!(stderr.contains("gaps=1 missed=10"), "{stderr}");
+    // Where the drop happened: seconds after start and the reader backlog then.
+    assert!(stderr.contains("first OS drop "), "{stderr}");
+    assert!(stderr.contains(" of 65536"), "{stderr}");
     assert!(stderr.contains("skipped_malformed=1"), "{stderr}");
     assert!(stderr.contains("skipped_unknown_event=1"), "{stderr}");
     assert!(!stderr.contains("/Users/test"), "{stderr}");

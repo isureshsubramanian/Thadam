@@ -20,7 +20,7 @@
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -151,8 +151,12 @@ where
         // Not joined, as the flow listener.
         std::thread::spawn(move || listener.serve(move |item| tx.send(Input::Agent(item)).is_ok()));
     }
+    let backlog = Arc::new(Backlog::default());
     // Not joined: a reader blocked on a quiet input must not hold up shutdown.
-    std::thread::spawn(move || read_all(source, &item_tx));
+    {
+        let backlog = Arc::clone(&backlog);
+        std::thread::spawn(move || read_all(source, &item_tx, &backlog));
+    }
 
     let (record_tx, record_rx) = sync_channel::<EventRecord>(RECORD_BUFFER);
     // Shared so progress lines show rows written so far, not only the total at the end.
@@ -189,6 +193,7 @@ where
             written: &written,
             status: &status,
             lost: &lost,
+            backlog: &backlog,
         },
     );
     drop(record_tx);
@@ -199,7 +204,33 @@ where
     Ok((ended, pipeline.stats.clone()))
 }
 
-fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>) {
+/// OS items waiting between the reader and the pipeline. When the OS logger drops events,
+/// this tells whether the collector fell behind (queue near `ITEM_BUFFER`) or the logger
+/// itself did (queue low). Counts only.
+#[derive(Default)]
+struct Backlog {
+    queued: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Backlog {
+    fn add(&self) {
+        let now = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peak.fetch_max(now, Ordering::Relaxed);
+    }
+
+    fn take(&self) {
+        self.queued.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// The highest backlog since the last call.
+    fn reset_peak(&self) -> usize {
+        self.peak
+            .swap(self.queued.load(Ordering::Relaxed), Ordering::Relaxed)
+    }
+}
+
+fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>, backlog: &Backlog) {
     loop {
         let item = match source.next() {
             Ok(Some(item)) => Ok(item),
@@ -210,6 +241,7 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>) {
             Err(e) => Err(e.to_string()),
         };
         let failed = item.is_err();
+        backlog.add();
         if tx.send(Input::Os(item)).is_err() || failed {
             return;
         }
@@ -343,6 +375,7 @@ struct Progress<'a> {
     written: &'a AtomicU64,
     status: &'a Mutex<SegmentStatus>,
     lost: &'a Lost,
+    backlog: &'a Backlog,
 }
 
 impl Progress<'_> {
@@ -364,6 +397,8 @@ fn process(
     let mut on_stop = Some(on_stop);
     let mut stop_seen: Option<Instant> = None;
     let mut last_report = Instant::now();
+    let started = Instant::now();
+    let mut drop_reported = false;
 
     let ended = loop {
         if stop.load(Ordering::SeqCst) && stop_seen.is_none() {
@@ -378,13 +413,26 @@ fn process(
         if last_report.elapsed() >= progress.every {
             pipeline.stats.written = progress.written.load(Ordering::Relaxed);
             pipeline.stats.store = progress.status.lock().ok().map(|s| *s);
-            crate::diag!("thadam-collector: {}", pipeline.stats);
+            crate::diag!(
+                "thadam-collector: {} queue_peak={}",
+                pipeline.stats,
+                progress.backlog.reset_peak()
+            );
             last_report = Instant::now();
         }
         match items.recv_timeout(POLL) {
             Ok(Input::Os(Ok(item))) => {
+                progress.backlog.take();
                 send(pipeline.handle(item), pipeline, redactor, records)?;
                 progress.publish_lost(&pipeline.stats);
+                if !drop_reported && pipeline.stats.gaps > 0 {
+                    drop_reported = true;
+                    crate::diag!(
+                        "thadam-collector: first OS drop {:.1} s after start, queue {} of {ITEM_BUFFER}",
+                        started.elapsed().as_secs_f64(),
+                        progress.backlog.queued.load(Ordering::Relaxed)
+                    );
+                }
             }
             Ok(Input::Net(item)) => {
                 send(pipeline.handle_flow(item), pipeline, redactor, records)?;
@@ -394,6 +442,7 @@ fn process(
                 send(pipeline.handle_agent(item), pipeline, redactor, records)?;
             }
             Ok(Input::Os(Err(e))) => {
+                progress.backlog.take();
                 send(pipeline.finish(), pipeline, redactor, records)?;
                 return Err(RunError::Source(e));
             }
