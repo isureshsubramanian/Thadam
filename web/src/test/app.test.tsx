@@ -65,6 +65,28 @@ describe("dashboard", () => {
     expect(screen.getByText(/Chain verified · seq 5–33/)).toBeTruthy();
   });
 
+  it("moves the range to the present on coming back to the tab after a while, not before", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-11-15T09:00:00Z"));
+      const calls = fake.install(base);
+      render(<App />);
+      await screen.findByText("Activity by tool");
+      const ends = () => calls.filter((c) => c.path.startsWith("/overview")).map((c) => new URLSearchParams(c.path.split("?")[1]).get("to"));
+      expect(ends()).toEqual(["2026-11-15T09:00:00.000Z"]);
+
+      vi.setSystemTime(new Date("2026-11-15T09:00:30Z"));
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(ends()).toHaveLength(1);
+
+      vi.setSystemTime(new Date("2026-11-15T09:05:00Z"));
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => { expect(ends()).toEqual(["2026-11-15T09:00:00.000Z", "2026-11-15T09:05:00.000Z"]); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks a host by its newest connection and keeps earlier flags in the tooltip", async () => {
     fake.install(base);
     render(<App />);

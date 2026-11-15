@@ -77,12 +77,29 @@ const views: { route: Route; label: string; icon: ReactNode }[] = [
   { route: { view: "search" }, label: "Search", icon: <SearchIcon className="ic" aria-hidden="true" /> },
 ];
 
+/** Back on the tab after this long, the range moves to the present. */
+const STALE_MS = 60_000;
+
 function Shell({ meta, onSignOut, onChanged }: { meta: Meta; onSignOut: () => void; onChanged: () => void }) {
   const route = useRoute();
   const [theme, toggleTheme] = useTheme();
   const [rangeKey, setRangeKey] = useState<RangeKey>("7d");
-  // Fixed per choice, so views reload when the range changes, not on every render.
-  const range = useMemo(() => resolve(rangeKey), [rangeKey]);
+  // The range ends at `at.now`. It holds still while you work in a view, so a grid's pages
+  // do not shift under you, and moves to the present when you pick a range, open another
+  // view, or come back to the tab after a while; otherwise an open dashboard would never
+  // show newer activity.
+  const [at, setAt] = useState(() => ({ view: route.view, now: new Date() }));
+  if (at.view !== route.view) setAt({ view: route.view, now: new Date() });
+  useEffect(() => {
+    const back = () => {
+      if (document.visibilityState === "visible") {
+        setAt((a) => (Date.now() - a.now.getTime() > STALE_MS ? { ...a, now: new Date() } : a));
+      }
+    };
+    document.addEventListener("visibilitychange", back);
+    return () => { document.removeEventListener("visibilitychange", back); };
+  }, []);
+  const range = useMemo(() => resolve(rangeKey, at.now), [rangeKey, at.now]);
 
   const body = (() => {
     switch (route.view) {
@@ -111,7 +128,7 @@ function Shell({ meta, onSignOut, onChanged }: { meta: Meta; onSignOut: () => vo
         <label className="row rangepick">
           <Clock className="ic" aria-hidden="true" />
           <span className="vh">Time range</span>
-          <select value={rangeKey} onChange={(e) => { setRangeKey(e.target.value as RangeKey); }}>
+          <select value={rangeKey} onChange={(e) => { setRangeKey(e.target.value as RangeKey); setAt((a) => ({ ...a, now: new Date() })); }}>
             {ranges.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
           </select>
         </label>
