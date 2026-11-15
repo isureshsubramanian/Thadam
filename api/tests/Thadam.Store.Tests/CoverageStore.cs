@@ -31,27 +31,47 @@ public sealed class CoverageStore : IDisposable
             ("paused", "disk_low", null, 18, 25, 9),
             ("gap", "future_reason", null, 26, 27, null),
         };
-        var prev = Chain.Genesis.ToArray();
-        long seq = 0;
         foreach (var w in windows)
         {
-            var e = new CatalogEntry(++seq, seq, w.Kind, null, null, null, null, null, null, null, null,
-                w.Reason, w.Detail, w.From * 1_000_000, w.To * 1_000_000, w.Missed);
-            var hash = Chain.CatalogHash(prev, e);
-            await using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO catalog VALUES ($seq, $seq, $kind, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $reason, $detail, $from, $to, $missed, $prev, $hash)";
-            cmd.Parameters.AddWithValue("$seq", seq);
-            cmd.Parameters.AddWithValue("$kind", w.Kind);
-            cmd.Parameters.AddWithValue("$reason", w.Reason);
-            cmd.Parameters.AddWithValue("$detail", (object?)w.Detail ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$from", e.FromUs!);
-            cmd.Parameters.AddWithValue("$to", e.ToUs!);
-            cmd.Parameters.AddWithValue("$missed", (object?)w.Missed ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$prev", prev);
-            cmd.Parameters.AddWithValue("$hash", hash);
-            await cmd.ExecuteNonQueryAsync(ct);
-            prev = hash;
+            await AppendAsync(w.Kind, w.Reason, w.Detail, w.From, w.To, w.Missed, ct);
         }
+    }
+
+    private byte[] _prev = Chain.Genesis.ToArray();
+    private long _seq;
+
+    /// <summary>Appends one chained entry, as the collector does.</summary>
+    public async Task AppendAsync(string kind, string reason, string? detail, long from, long to, long? missed, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection($"Data Source={System.IO.Path.Combine(Path, StoreFolder.CatalogFile)};Pooling=False");
+        await conn.OpenAsync(ct);
+        var seq = ++_seq;
+        var e = new CatalogEntry(seq, seq, kind, null, null, null, null, null, null, null, null,
+            reason, detail, from * 1_000_000, to * 1_000_000, missed);
+        var hash = Chain.CatalogHash(_prev, e);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO catalog VALUES ($seq, $seq, $kind, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $reason, $detail, $from, $to, $missed, $prev, $hash)";
+        cmd.Parameters.AddWithValue("$seq", seq);
+        cmd.Parameters.AddWithValue("$kind", kind);
+        cmd.Parameters.AddWithValue("$reason", reason);
+        cmd.Parameters.AddWithValue("$detail", (object?)detail ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$from", e.FromUs!);
+        cmd.Parameters.AddWithValue("$to", e.ToUs!);
+        cmd.Parameters.AddWithValue("$missed", (object?)missed ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$prev", _prev);
+        cmd.Parameters.AddWithValue("$hash", hash);
+        await cmd.ExecuteNonQueryAsync(ct);
+        _prev = hash;
+    }
+
+    /// <summary>Runs SQL against the catalog, as tampering would.</summary>
+    public async Task ExecAsync(string sql, CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection($"Data Source={System.IO.Path.Combine(Path, StoreFolder.CatalogFile)};Pooling=False");
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public void Dispose() => Directory.Delete(Path, true);

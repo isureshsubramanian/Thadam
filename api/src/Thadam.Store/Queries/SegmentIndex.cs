@@ -20,7 +20,7 @@ public sealed class SegmentIndex(StoreFolder folder)
     /// <summary>Kept segments that have rows, oldest first.</summary>
     public async Task<IReadOnlyList<SegmentSpan>> ListAsync(CancellationToken ct)
     {
-        var catalog = await folder.ReadCatalogAsync(ct).ConfigureAwait(false);
+        var catalog = await folder.CatalogAsync(ct).ConfigureAwait(false);
         var spans = new List<SegmentSpan>();
         foreach (var seg in StoreFolder.Segments(catalog.Entries).Where(s => s.IsKept))
         {

@@ -25,7 +25,7 @@ public static class MetaEndpoints
             return bad;
         }
         var range = Args.Range(args.From, args.To, time);
-        var catalog = await store.ReadCatalogAsync(ct).ConfigureAwait(false);
+        var catalog = await store.CatalogAsync(ct).ConfigureAwait(false);
         var gaps = StoreFolder.Gaps(catalog.Entries)
             .Concat(StoreFolder.Pauses(catalog.Entries).Select(p => new Gap(p.FromUs, p.ToUs, "paused", null, p.Missed)))
             .Where(g => g.FromUs < range.ToUs && g.ToUs > range.FromUs)

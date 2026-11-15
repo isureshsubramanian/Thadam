@@ -72,19 +72,72 @@ public sealed class StoreFolder
     /// <summary>Reads every catalog entry in order and walks the catalog's own chain.</summary>
     public async Task<CatalogRead> ReadCatalogAsync(CancellationToken ct)
     {
-        await using var conn = await OpenReadOnlyAsync(
-                System.IO.Path.Combine(Path, CatalogFile), CatalogSchemaVersions, ct)
-            .ConfigureAwait(false);
+        await using var conn = await OpenCatalogAsync(ct).ConfigureAwait(false);
+        return (await ReadFromAsync(conn, [], Chain.Genesis.ToArray(), ct).ConfigureAwait(false)).Read;
+    }
+
+    /// <summary>
+    /// As <see cref="ReadCatalogAsync"/>, for queries: the catalog only grows, so once its last
+    /// checked entry is found unchanged, only the entries after it are read and checked. A
+    /// catalog that was replaced, shortened or broken is read in full again. The chain
+    /// verifier still reads it in full (<see cref="ReadCatalogAsync"/>).
+    /// </summary>
+    public async Task<CatalogRead> CatalogAsync(CancellationToken ct)
+    {
+        // Concurrent calls may each read; the last to finish is kept. One reference, swapped whole.
+        var known = _catalog;
+        await using var conn = await OpenCatalogAsync(ct).ConfigureAwait(false);
+        if (known is not null
+            && await StillEndsWithAsync(conn, known.Read.Entries[^1].Seq, known.LastHash, ct).ConfigureAwait(false))
+        {
+            var more = await ReadFromAsync(conn, known.Read.Entries, known.LastHash, ct).ConfigureAwait(false);
+            return more.Read.Entries.Count == known.Read.Entries.Count && more.Read.BrokenAt is null
+                ? known.Read
+                : Remember(more);
+        }
+        return Remember(await ReadFromAsync(conn, [], Chain.Genesis.ToArray(), ct).ConfigureAwait(false));
+    }
+
+    private CachedCatalog? _catalog;
+
+    /// <summary>A checked catalog read and the stored hash of its last entry.</summary>
+    private sealed record CachedCatalog(CatalogRead Read, byte[] LastHash);
+
+    /// <summary>Keeps an unbroken read with entries for the next call; a broken one is read in full each time.</summary>
+    private CatalogRead Remember(Checked read)
+    {
+        _catalog = read.Read is { BrokenAt: null, Entries.Count: > 0 } ? new CachedCatalog(read.Read, read.LastHash) : null;
+        return read.Read;
+    }
+
+    private Task<SqliteConnection> OpenCatalogAsync(CancellationToken ct) =>
+        OpenReadOnlyAsync(System.IO.Path.Combine(Path, CatalogFile), CatalogSchemaVersions, ct);
+
+    private static async Task<bool> StillEndsWithAsync(SqliteConnection conn, long seq, byte[] hash, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT hash FROM catalog WHERE seq = $seq";
+        cmd.Parameters.AddWithValue("$seq", seq);
+        return await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) is byte[] stored && stored.AsSpan().SequenceEqual(hash);
+    }
+
+    /// <summary>A catalog read with the stored hash its last entry ends on.</summary>
+    private sealed record Checked(CatalogRead Read, byte[] LastHash);
+
+    /// <summary>Reads the entries after <paramref name="before"/>, continuing its chain from <paramref name="prev"/>.</summary>
+    private static async Task<Checked> ReadFromAsync(
+        SqliteConnection conn, IReadOnlyList<CatalogEntry> before, byte[] prev, CancellationToken ct)
+    {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT seq, at_us, kind, segment, first_seq, last_seq, first_prev_hash, last_hash,
                    last_ts_us, rows, bytes, reason, detail, from_us, to_us, missed, prev_hash, hash
-            FROM catalog ORDER BY seq
+            FROM catalog WHERE seq > $after ORDER BY seq
             """;
+        long expected = before.Count == 0 ? 1 : before[^1].Seq + 1;
+        cmd.Parameters.AddWithValue("$after", expected - 1);
         await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        var entries = new List<CatalogEntry>();
-        var prev = Chain.Genesis.ToArray();
-        long expected = 1;
+        var entries = new List<CatalogEntry>(before);
         while (await r.ReadAsync(ct).ConfigureAwait(false))
         {
             var e = new CatalogEntry(
@@ -97,13 +150,13 @@ public sealed class StoreFolder
                 || !storedPrev.AsSpan().SequenceEqual(prev)
                 || !Chain.CatalogHash(prev, e).AsSpan().SequenceEqual(stored))
             {
-                return new CatalogRead(entries, e.Seq);
+                return new Checked(new CatalogRead(entries, e.Seq), prev);
             }
             entries.Add(e);
             prev = stored;
             expected++;
         }
-        return new CatalogRead(entries, null);
+        return new Checked(new CatalogRead(entries, null), prev);
     }
 
     /// <summary>
