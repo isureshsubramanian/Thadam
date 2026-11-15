@@ -50,73 +50,114 @@ public sealed class StoreQueries(SegmentIndex index)
         var sensitive = new SortedDictionary<string, long>(StringComparer.Ordinal);
         long deniedAgent = 0, deniedUser = 0, deniedOs = 0;
 
-        foreach (var span in await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false))
+        // Every scan of every segment runs at once, each on its own connection, beside the
+        // flagged-queue scan. Each fold below is a sum, a set or a newest-by-seq, so the order
+        // rows arrive in does not matter. One lock.
+        var gate = new Lock();
+        var flagged = FlagItemsAsync(filter, reviewed, ct);
+        Func<SqliteConnection, CancellationToken, Task>[] scans =
+        [
+            // Totals and sessions in one pass: per tool and session, added up per tool here.
+            async (conn, ct) =>
+            {
+                await foreach (var r in QueryAsync(conn, filter, """
+                    SELECT tool, session_id,
+                        sum(CASE WHEN category = 'file' AND action = 'read' THEN count ELSE 0 END),
+                        sum(CASE WHEN category = 'file' AND action IN ('write', 'create', 'rename', 'delete') THEN count ELSE 0 END),
+                        sum(CASE WHEN category = 'command' THEN count ELSE 0 END),
+                        sum(CASE WHEN outcome = 'denied_by_agent' THEN count ELSE 0 END),
+                        sum(CASE WHEN outcome = 'denied_by_user' THEN count ELSE 0 END),
+                        sum(CASE WHEN outcome = 'denied_by_os' THEN count ELSE 0 END)
+                    FROM events WHERE {filter} GROUP BY tool, session_id
+                    """, null, ct).ConfigureAwait(false))
+                {
+                    lock (gate)
+                    {
+                        var a = Tool(r.GetString(0));
+                        if (!r.IsDBNull(1))
+                        {
+                            a.Sessions.Add(r.GetString(1));
+                        }
+                        a.FilesRead += r.GetInt64(2);
+                        a.FilesWritten += r.GetInt64(3);
+                        a.Commands += r.GetInt64(4);
+                        a.Denied += r.GetInt64(5) + r.GetInt64(6) + r.GetInt64(7);
+                        deniedAgent += r.GetInt64(5);
+                        deniedUser += r.GetInt64(6);
+                        deniedOs += r.GetInt64(7);
+                    }
+                }
+            },
+            // Counted by folder in SQL, with the same folder rule, instead of a row each into here.
+            async (conn, ct) =>
+            {
+                conn.CreateFunction("outside_folder", (string path) => Values.OutsideFolder(path), isDeterministic: true);
+                await foreach (var r in QueryAsync(conn, filter, """
+                    SELECT tool, outside_folder(target), flags, count(*) FROM events
+                    WHERE {filter} AND instr(',' || flags || ',', ',outside_project,') > 0
+                    GROUP BY 1, 2, 3
+                    """, null, ct).ConfigureAwait(false))
+                {
+                    lock (gate)
+                    {
+                        var tool = r.GetString(0);
+                        var n = r.GetInt64(3);
+                        Tool(tool).Outside += n;
+                        outsideRecords += n;
+                        var key = r.GetString(1);
+                        if (!outside.TryGetValue(key, out var o))
+                        {
+                            o = (0, new SortedSet<string>(StringComparer.Ordinal), new SortedSet<string>(StringComparer.Ordinal));
+                        }
+                        o.Tools.Add(tool);
+                        foreach (var f in Values.Flags(r.GetString(2)).Where(f => f != "outside_project"))
+                        {
+                            o.Flags.Add(f);
+                        }
+                        outside[key] = (o.Records + n, o.Tools, o.Flags);
+                    }
+                }
+            },
+            async (conn, ct) =>
+            {
+                await foreach (var r in QueryAsync(conn, filter,
+                    "SELECT tool, target, category, " + HostTally.Columns
+                        + " FROM events WHERE {filter} AND category LIKE 'network%' GROUP BY tool, target, category",
+                    null, ct).ConfigureAwait(false))
+                {
+                    lock (gate)
+                    {
+                        var key = (r.GetString(1), r.GetString(2));
+                        Tool(r.GetString(0)).Hosts.Add(key.Item1);
+                        var h = hosts.TryGetValue(key, out var x) ? x : hosts[key] = new HostTally();
+                        h.Add(r, 3);
+                    }
+                }
+            },
+            async (conn, ct) =>
+            {
+                await foreach (var r in QueryAsync(conn, filter,
+                    "SELECT detections, count(*) FROM events WHERE {filter} AND detections != '' GROUP BY detections", null, ct).ConfigureAwait(false))
+                {
+                    lock (gate)
+                    {
+                        var rows = r.GetInt64(1);
+                        foreach (var (kind, n) in Values.Detections(r.GetString(0)))
+                        {
+                            sensitive[kind] = sensitive.GetValueOrDefault(kind) + n * rows;
+                        }
+                    }
+                }
+            },
+        ];
+        var spans = await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false);
+        await Parallel.ForEachAsync(spans.SelectMany(span => scans.Select(scan => (span, scan))), ct, async (work, ct) =>
         {
-            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
-            await foreach (var r in QueryAsync(conn, filter, """
-                SELECT tool,
-                    sum(CASE WHEN category = 'file' AND action = 'read' THEN count ELSE 0 END),
-                    sum(CASE WHEN category = 'file' AND action IN ('write', 'create', 'rename', 'delete') THEN count ELSE 0 END),
-                    sum(CASE WHEN category = 'command' THEN count ELSE 0 END),
-                    sum(CASE WHEN outcome = 'denied_by_agent' THEN count ELSE 0 END),
-                    sum(CASE WHEN outcome = 'denied_by_user' THEN count ELSE 0 END),
-                    sum(CASE WHEN outcome = 'denied_by_os' THEN count ELSE 0 END)
-                FROM events WHERE {filter} GROUP BY tool
-                """, null, ct).ConfigureAwait(false))
-            {
-                var a = Tool(r.GetString(0));
-                a.FilesRead += r.GetInt64(1);
-                a.FilesWritten += r.GetInt64(2);
-                a.Commands += r.GetInt64(3);
-                a.Denied += r.GetInt64(4) + r.GetInt64(5) + r.GetInt64(6);
-                deniedAgent += r.GetInt64(4);
-                deniedUser += r.GetInt64(5);
-                deniedOs += r.GetInt64(6);
-            }
-            await foreach (var r in QueryAsync(conn, filter,
-                "SELECT DISTINCT tool, session_id FROM events WHERE {filter} AND session_id IS NOT NULL", null, ct).ConfigureAwait(false))
-            {
-                Tool(r.GetString(0)).Sessions.Add(r.GetString(1));
-            }
-            await foreach (var r in QueryAsync(conn, filter,
-                "SELECT tool, target, flags FROM events WHERE {filter} AND instr(',' || flags || ',', ',outside_project,') > 0", null, ct).ConfigureAwait(false))
-            {
-                var tool = r.GetString(0);
-                Tool(tool).Outside++;
-                outsideRecords++;
-                var key = Values.OutsideFolder(r.GetString(1));
-                if (!outside.TryGetValue(key, out var o))
-                {
-                    o = (0, new SortedSet<string>(StringComparer.Ordinal), new SortedSet<string>(StringComparer.Ordinal));
-                }
-                o.Tools.Add(tool);
-                foreach (var f in Values.Flags(r.GetString(2)).Where(f => f != "outside_project"))
-                {
-                    o.Flags.Add(f);
-                }
-                outside[key] = (o.Records + 1, o.Tools, o.Flags);
-            }
-            await foreach (var r in QueryAsync(conn, filter,
-                "SELECT tool, target, category, " + HostTally.Columns
-                    + " FROM events WHERE {filter} AND category LIKE 'network%' GROUP BY tool, target, category",
-                null, ct).ConfigureAwait(false))
-            {
-                var key = (r.GetString(1), r.GetString(2));
-                Tool(r.GetString(0)).Hosts.Add(key.Item1);
-                var h = hosts.TryGetValue(key, out var x) ? x : hosts[key] = new HostTally();
-                h.Add(r, 3);
-            }
-            await foreach (var r in QueryAsync(conn, filter,
-                "SELECT detections FROM events WHERE {filter} AND detections != ''", null, ct).ConfigureAwait(false))
-            {
-                foreach (var (kind, n) in Values.Detections(r.GetString(0)))
-                {
-                    sensitive[kind] = sensitive.GetValueOrDefault(kind) + n;
-                }
-            }
-        }
+            await using var conn = await index.OpenAsync(work.span, ct).ConfigureAwait(false);
+            await work.scan(conn, ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
 
-        var items = await FlagItemsAsync(filter, reviewed, ct).ConfigureAwait(false);
+        var items = await flagged.ConfigureAwait(false);
         var open = items.Where(i => !i.Reviewed).ToList();
         foreach (var i in open)
         {
@@ -149,7 +190,9 @@ public sealed class StoreQueries(SegmentIndex index)
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(reviewed);
         var groups = new Dictionary<(string Rule, string Target, string? Session), FlagAcc>();
-        foreach (var span in await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false))
+        // As the overview: segments at once, folds that do not depend on order, one lock.
+        var gate = new Lock();
+        await Parallel.ForEachAsync(await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false), ct, async (span, ct) =>
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
             await foreach (var r in QueryAsync(conn, filter, $"""
@@ -166,21 +209,27 @@ public sealed class StoreQueries(SegmentIndex index)
                 var key = (c.Rule, r.GetString(5), session);
                 var seq = r.GetInt64(0);
                 var ts = r.GetInt64(2);
-                if (!groups.TryGetValue(key, out var g))
+                var tool = r.GetString(3);
+                var count = r.GetInt64(10);
+                var eventId = r.GetString(1);
+                lock (gate)
                 {
-                    g = groups[key] = new FlagAcc(c.Severity, r.GetString(3), ts);
-                }
-                g.Rows++;
-                g.Count += r.GetInt64(10);
-                g.FirstTs = Math.Min(g.FirstTs, ts);
-                g.LastTs = Math.Max(g.LastTs, ts);
-                if (seq > g.LastSeq)
-                {
-                    g.LastSeq = seq;
-                    g.LastEventId = r.GetString(1);
+                    if (!groups.TryGetValue(key, out var g))
+                    {
+                        g = groups[key] = new FlagAcc(c.Severity, tool, ts);
+                    }
+                    g.Rows++;
+                    g.Count += count;
+                    g.FirstTs = Math.Min(g.FirstTs, ts);
+                    g.LastTs = Math.Max(g.LastTs, ts);
+                    if (seq > g.LastSeq)
+                    {
+                        g.LastSeq = seq;
+                        g.LastEventId = eventId;
+                    }
                 }
             }
-        }
+        }).ConfigureAwait(false);
         return [.. groups
             .Select(kv => new FlagItem(kv.Key.Rule, kv.Value.Severity, kv.Key.Target, kv.Key.Session, kv.Value.Tool,
                 kv.Value.Rows, kv.Value.Count, kv.Value.FirstTs, kv.Value.LastTs, kv.Value.LastSeq, kv.Value.LastEventId,
