@@ -22,7 +22,8 @@ const projectName = (p: string | null): string => (p === null ? "no project" : (
 
 function SessionList({ range }: { range: TimeRange }) {
   const [q, setQ] = useState("");
-  const page = usePaged((after, signal) => api.sessions({ ...range, q, after }, signal), [range.from, range.to, q]);
+  const { from, to } = range;
+  const page = usePaged((after, signal) => api.sessions({ from, to, q, after }, signal), [from, to, q]);
   return (
     <div className="stack">
       <PageHead title="Sessions" sub="Most recently active first" />

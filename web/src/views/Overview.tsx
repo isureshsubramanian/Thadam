@@ -56,7 +56,8 @@ function kpis(d: Data): Kpi[] {
 }
 
 export function Overview({ range }: { range: TimeRange }) {
-  const { data, loading } = useApi((signal) => api.overview(range, signal), [range.from, range.to]);
+  const { from, to } = range;
+  const { data, loading } = useApi((signal) => api.overview({ from, to }, signal), [from, to]);
   if (data === undefined) return loading ? <Loading /> : null;
   const maxFolder = Math.max(1, ...data.outsideFolders.map((f) => f.records));
   return (

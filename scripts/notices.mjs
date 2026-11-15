@@ -93,7 +93,9 @@ function matches(pattern, id) {
  * must still be permissive (ADR-008 Dependencies). The shipped allow list plus these
  * permissive licences; nothing copyleft, share-alike, non-commercial or unstated.
  */
-const npmBuildOnlyExtra = new Set(["BSD-2-Clause", "BSD-3-Clause", "ISC", "BlueOak-1.0.0", "MIT-0", "CC0-1.0", "0BSD"]);
+// CC-BY-4.0: browser-support data the hooks lint loads through Babel (owner decision 2026-11-16);
+// attribution only, and build-only, so never in the bundle.
+const npmBuildOnlyExtra = new Set(["BSD-2-Clause", "BSD-3-Clause", "ISC", "BlueOak-1.0.0", "MIT-0", "CC0-1.0", "0BSD", "CC-BY-4.0"]);
 
 function npmLicence(pkg) {
   if (typeof pkg.license === "string") return pkg.license.replace(/^\((.*)\)$/, "$1");

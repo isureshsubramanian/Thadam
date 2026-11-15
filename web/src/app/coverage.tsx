@@ -20,10 +20,11 @@ const SharedCoverage = createContext<Shared | undefined>(undefined);
 export function CoverageProvider({ range, children }: { range: TimeRange; children: ReactNode }) {
   const signedOut = useSignedOut();
   const [shared, setShared] = useState<Shared>({});
+  const { from, to } = range;
   useEffect(() => {
     const ctl = new AbortController();
     setShared({});
-    api.coverage(range, ctl.signal).then(
+    api.coverage({ from, to }, ctl.signal).then(
       (data) => { setShared({ data }); },
       (e: unknown) => {
         if (ctl.signal.aborted) return;
@@ -32,7 +33,7 @@ export function CoverageProvider({ range, children }: { range: TimeRange; childr
       },
     );
     return () => { ctl.abort(); };
-  }, [range.from, range.to]);
+  }, [from, to, signedOut]);
   return <SharedCoverage.Provider value={shared}>{children}</SharedCoverage.Provider>;
 }
 
@@ -185,7 +186,8 @@ export function CoverageCard() {
 }
 
 export function TimelineCoverage({ range }: { range: TimeRange }) {
-  const { data, loading } = useApi(signal => api.coverage(range, signal), [range.from, range.to]);
+  const { from, to } = range;
+  const { data, loading } = useApi(signal => api.coverage({ from, to }, signal), [from, to]);
   const gaps = data?.gaps.filter(g => g.reason !== "machine_off" && Date.parse(g.from) <= Date.parse(range.to) && Date.parse(g.to) >= Date.parse(range.from)) ?? [];
   if (loading || gaps.length === 0) return null;
   return <div role="status" className="card pad">{gaps.slice(0, 5).map((g, i) => <p key={i}>Thadam was not watching {when(g.from)} to {when(g.to)} ({gapWords(g)}): activity in that window is missing.</p>)}{gaps.length > 5 && <p>and {num(gaps.length - 5)} more</p>}</div>;

@@ -41,6 +41,8 @@ export function usePaged<T>(
   // A change of list (filter, range, tab) starts again at page 1.
   const afters = stack.key === key ? stack.afters : [null];
   const after = afters.at(-1) ?? null;
+  // Forwards the caller's deps, which the lint checks at each usePaged call instead.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const page = useApi((signal) => load(after, signal), [...deps, after]);
 
   const data = page.loading ? undefined : page.data;

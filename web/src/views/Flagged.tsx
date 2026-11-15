@@ -58,9 +58,10 @@ export function Flagged({ range, onChanged }: { range: TimeRange; onChanged: () 
   const [picked, setPicked] = useState<{ key: string; ids: ReadonlySet<string> }>({ key: "", ids: new Set() });
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; error: boolean }>();
+  const { from, to } = range;
   const page = usePaged(
-    (after, signal) => api.flags({ ...range, status, severity, q, after }, signal),
-    [range.from, range.to, status, severity, q],
+    (after, signal) => api.flags({ from, to, status, severity, q, after }, signal),
+    [from, to, status, severity, q],
   );
   // Selection belongs to the rows on screen: a new page, tab or search clears it.
   const key = JSON.stringify([range.from, range.to, status, severity, q, page.index]);
