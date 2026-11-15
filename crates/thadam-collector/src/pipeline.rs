@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use thadam_core::{Action, Category, CoreError, DetectorKind, Flag, HOOK_BIN, NewEvent, Redactor};
 use thadam_store::SegmentStatus;
@@ -144,7 +145,8 @@ pub struct Pipeline {
     /// Time of the latest OS event handled.
     watermark: Option<time::OffsetDateTime>,
     /// Finds secrets in roll-up candidates' paths, which must stay individual (ADR-005).
-    redactor: Redactor,
+    /// Shared with the run loop, which redacts every record: compiled once.
+    redactor: Arc<Redactor>,
     pub stats: Stats,
 }
 
@@ -161,7 +163,7 @@ impl Pipeline {
             net: NetFlows::new(settings.window),
             agent: AgentRows::new(HOOK_BIN),
             watermark: None,
-            redactor: Redactor::with_default_detectors()?,
+            redactor: Arc::new(Redactor::with_default_detectors()?),
             stats: Stats::default(),
         })
     }
@@ -170,6 +172,11 @@ impl Pipeline {
     /// (tests and local runs).
     pub fn set_hook_bin(&mut self, path: &str) {
         self.agent = AgentRows::new(path);
+    }
+
+    /// The detectors this pipeline uses, for redacting its records.
+    pub fn redactor(&self) -> Arc<Redactor> {
+        Arc::clone(&self.redactor)
     }
 
     pub fn registry(&self) -> &Registry {

@@ -1,8 +1,48 @@
-import { api } from "../api/client";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { api, SignedOut } from "../api/client";
 import type { Coverage, Gap } from "../api/schemas";
 import { clock, count, day, num, span, utc, when, words, zone } from "./format";
 import type { TimeRange } from "./range";
+import { useSignedOut } from "./session";
 import { useApi } from "./useApi";
+
+interface Shared {
+  data?: Coverage;
+  error?: Error;
+}
+
+const SharedCoverage = createContext<Shared | undefined>(undefined);
+
+/**
+ * Loads coverage for the app's range once; the header pill and the Overview card both read it.
+ * A failure is not thrown here but by each reader, inside its own Error Boundary.
+ */
+export function CoverageProvider({ range, children }: { range: TimeRange; children: ReactNode }) {
+  const signedOut = useSignedOut();
+  const [shared, setShared] = useState<Shared>({});
+  useEffect(() => {
+    const ctl = new AbortController();
+    setShared({});
+    api.coverage(range, ctl.signal).then(
+      (data) => { setShared({ data }); },
+      (e: unknown) => {
+        if (ctl.signal.aborted) return;
+        if (e instanceof SignedOut) signedOut();
+        else setShared({ error: e instanceof Error ? e : new Error("request failed") });
+      },
+    );
+    return () => { ctl.abort(); };
+  }, [range.from, range.to]);
+  return <SharedCoverage.Provider value={shared}>{children}</SharedCoverage.Provider>;
+}
+
+/** The provider's coverage; undefined while it loads. */
+function useSharedCoverage(): Coverage | undefined {
+  const shared = useContext(SharedCoverage);
+  if (shared === undefined) throw new Error("coverage read outside its provider");
+  if (shared.error !== undefined) throw shared.error;
+  return shared.data;
+}
 
 export function gapWords(g: Gap): string {
   switch (g.reason) {
@@ -31,9 +71,9 @@ export function CoveragePill({ data }: { data: Coverage }) {
   </span>;
 }
 
-export function HeaderCoverage({ range }: { range: TimeRange }) {
-  const { data, loading } = useApi(signal => api.coverage(range, signal), [range.from, range.to]);
-  return data && !loading ? <CoveragePill data={data} /> : null;
+export function HeaderCoverage() {
+  const data = useSharedCoverage();
+  return data ? <CoveragePill data={data} /> : null;
 }
 
 /** How a gap reads on the timeline: the Mac being off is expected, Thadam stopping is a warning, lost events are worse. */
@@ -94,9 +134,9 @@ function ticks(from: number, to: number): string[] {
   });
 }
 
-export function CoverageCard({ range }: { range: TimeRange }) {
-  const { data, loading } = useApi(signal => api.coverage(range, signal), [range.from, range.to]);
-  if (!data || loading) return null;
+export function CoverageCard() {
+  const data = useSharedCoverage();
+  if (!data) return null;
   const from = Date.parse(data.range.from);
   const to = Date.parse(data.range.to);
   const total = Math.max(1, to - from);

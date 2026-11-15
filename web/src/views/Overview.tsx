@@ -71,7 +71,7 @@ export function Overview({ range }: { range: TimeRange }) {
           </button>
         ))}
       </div>
-      <CoverageCard range={range} />
+      <CoverageCard />
 
       <section className="card" aria-labelledby="bytool">
         <div className="cardhead">

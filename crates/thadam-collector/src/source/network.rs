@@ -7,7 +7,7 @@
 //! never echoed: it may hold a host name of any app on the machine.
 
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufReader};
 use std::net::IpAddr;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,6 +19,8 @@ use thadam_core::model::MAX_PATH;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+
+use super::agent::{Line, read_line_limited};
 
 /// Where the collector listens. Its folder is root-only (ADR-007 Decision 1). The extension
 /// connects to the same path (`defaultFlowSocket` in `macos/ThadamNetKit`); change both.
@@ -418,49 +420,6 @@ fn read_connection(stream: UnixStream, send: &impl Fn(FlowItem) -> bool) {
         };
         if !send(item) {
             return;
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Line {
-    /// A line is in the buffer, without its newline.
-    Done,
-    /// A line over the limit was read and thrown away.
-    TooLong,
-    End,
-}
-
-/// Reads one line into `buf`, keeping at most `max` bytes in memory however long it is.
-fn read_line_limited(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -> io::Result<Line> {
-    buf.clear();
-    let mut too_long = false;
-    loop {
-        let chunk = reader.fill_buf()?;
-        if chunk.is_empty() {
-            return Ok(match (too_long, buf.is_empty()) {
-                (true, _) => Line::TooLong,
-                (false, true) => Line::End,
-                // A last line without a newline still counts.
-                (false, false) => Line::Done,
-            });
-        }
-        let (part, found) = match chunk.iter().position(|b| *b == b'\n') {
-            Some(i) => (&chunk[..i], Some(i + 1)),
-            None => (chunk, None),
-        };
-        if !too_long {
-            if buf.len() + part.len() > max {
-                too_long = true;
-                buf.clear();
-            } else {
-                buf.extend_from_slice(part);
-            }
-        }
-        let used = found.unwrap_or(chunk.len());
-        reader.consume(used);
-        if found.is_some() {
-            return Ok(if too_long { Line::TooLong } else { Line::Done });
         }
     }
 }

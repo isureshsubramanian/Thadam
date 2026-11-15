@@ -89,6 +89,14 @@ describe("dashboard", () => {
     expect(screen.queryByRole("button", { name: "Export CSV" })).toBeNull();
   });
 
+  it("asks for coverage once when the header and the overview both show it", async () => {
+    const calls = fake.install(base);
+    render(<App />);
+    await screen.findByText("Activity by tool");
+    await screen.findByText("Coverage");
+    expect(calls.filter((c) => c.path.startsWith("/coverage"))).toHaveLength(1);
+  });
+
   it("renders the overview from the API", async () => {
     fake.install(base);
     render(<App />);

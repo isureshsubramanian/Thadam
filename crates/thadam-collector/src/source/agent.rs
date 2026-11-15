@@ -263,7 +263,8 @@ pub(crate) enum Line {
     End,
 }
 
-/// Reads one line into `buf`, keeping at most `max` bytes in memory however long it is.
+/// Reads one line into `buf`, keeping at most `max` bytes in memory however long it is. Shared
+/// by the agent, flow and audit sockets.
 pub(crate) fn read_line_limited(
     reader: &mut impl BufRead,
     buf: &mut Vec<u8>,

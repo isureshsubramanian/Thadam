@@ -147,7 +147,7 @@ pub fn run<S>(
 where
     S: EventSource + Send + 'static,
 {
-    let redactor = Redactor::with_default_detectors()?;
+    let redactor = pipeline.redactor();
     let (item_tx, item_rx) = sync_channel::<Input>(ITEM_BUFFER);
     let lost = Arc::new(Lost::default());
     if let Some(listener) = flows {

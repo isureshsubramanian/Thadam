@@ -8,7 +8,7 @@ import { Flagged } from "../views/Flagged";
 import { Overview } from "../views/Overview";
 import { Search } from "../views/Search";
 import { Sessions } from "../views/Sessions";
-import { HeaderCoverage } from "./coverage";
+import { CoverageProvider, HeaderCoverage } from "./coverage";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { num } from "./format";
 import { ranges, resolve, type RangeKey } from "./range";
@@ -115,55 +115,57 @@ function Shell({ meta, onSignOut, onChanged }: { meta: Meta; onSignOut: () => vo
   })();
 
   return (
-    <div className="app">
-      <header className="top">
-        <div className="row brand">
-          <img className="logo" src="/favicon.svg" alt="" width={34} height={34} />
-          <div>
-            <span className="name">Thadam</span>
-            <span className="muted small">AI tool audit · this Mac</span>
+    <CoverageProvider range={range}>
+      <div className="app">
+        <header className="top">
+          <div className="row brand">
+            <img className="logo" src="/favicon.svg" alt="" width={34} height={34} />
+            <div>
+              <span className="name">Thadam</span>
+              <span className="muted small">AI tool audit · this Mac</span>
+            </div>
           </div>
+          <span className="spacer" />
+          <label className="row rangepick">
+            <Clock className="ic" aria-hidden="true" />
+            <span className="vh">Time range</span>
+            <select value={rangeKey} onChange={(e) => { setRangeKey(e.target.value as RangeKey); setAt((a) => ({ ...a, now: new Date() })); }}>
+              {ranges.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
+            </select>
+          </label>
+          <ChainBadge chain={meta.chain} />
+          <ErrorBoundary key={`${range.from}${range.to}`} area="coverage"><HeaderCoverage /></ErrorBoundary>
+          <IconButton label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggleTheme}>
+            {theme === "dark" ? <Sun className="ic" aria-hidden="true" /> : <Moon className="ic" aria-hidden="true" />}
+          </IconButton>
+          {meta.user !== null && <span className="muted">{meta.user}</span>}
+          <IconButton label="Sign out" onClick={onSignOut}>
+            <LogOut className="ic" aria-hidden="true" />
+          </IconButton>
+        </header>
+        <div className="layout">
+          <nav aria-label="Views" className="side">
+            {views.map((v) => (
+              <a key={v.label} className={`nav${v.route.view === route.view ? " on" : ""}`} href={href(v.route)}
+                aria-current={v.route.view === route.view ? "page" : undefined}>
+                {v.icon}<span>{v.label}</span>
+              </a>
+            ))}
+            <div className="tools">
+              <span className="kl">Registered tools</span>
+              {meta.tools.map((t) => <span key={t.key} className="tool">{t.displayName}</span>)}
+              <span className="muted small">Matched by code-signing identity. Display names come from the registry.</span>
+            </div>
+            <a className="muted small" href="/notices" target="_blank" rel="noreferrer">Third-party notices</a>
+          </nav>
+          <main className="main">
+            <ErrorBoundary key={route.view} area={route.view}>
+              {body}
+            </ErrorBoundary>
+          </main>
         </div>
-        <span className="spacer" />
-        <label className="row rangepick">
-          <Clock className="ic" aria-hidden="true" />
-          <span className="vh">Time range</span>
-          <select value={rangeKey} onChange={(e) => { setRangeKey(e.target.value as RangeKey); setAt((a) => ({ ...a, now: new Date() })); }}>
-            {ranges.map((r) => <option key={r.key} value={r.key}>{r.label}</option>)}
-          </select>
-        </label>
-        <ChainBadge chain={meta.chain} />
-        <ErrorBoundary key={`${range.from}${range.to}`} area="coverage"><HeaderCoverage range={range} /></ErrorBoundary>
-        <IconButton label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggleTheme}>
-          {theme === "dark" ? <Sun className="ic" aria-hidden="true" /> : <Moon className="ic" aria-hidden="true" />}
-        </IconButton>
-        {meta.user !== null && <span className="muted">{meta.user}</span>}
-        <IconButton label="Sign out" onClick={onSignOut}>
-          <LogOut className="ic" aria-hidden="true" />
-        </IconButton>
-      </header>
-      <div className="layout">
-        <nav aria-label="Views" className="side">
-          {views.map((v) => (
-            <a key={v.label} className={`nav${v.route.view === route.view ? " on" : ""}`} href={href(v.route)}
-              aria-current={v.route.view === route.view ? "page" : undefined}>
-              {v.icon}<span>{v.label}</span>
-            </a>
-          ))}
-          <div className="tools">
-            <span className="kl">Registered tools</span>
-            {meta.tools.map((t) => <span key={t.key} className="tool">{t.displayName}</span>)}
-            <span className="muted small">Matched by code-signing identity. Display names come from the registry.</span>
-          </div>
-          <a className="muted small" href="/notices" target="_blank" rel="noreferrer">Third-party notices</a>
-        </nav>
-        <main className="main">
-          <ErrorBoundary key={route.view} area={route.view}>
-            {body}
-          </ErrorBoundary>
-        </main>
       </div>
-    </div>
+    </CoverageProvider>
   );
 }
 
