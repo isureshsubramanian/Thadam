@@ -1,7 +1,14 @@
-// Local sign-in (ADR-008 Decision 2). The password is sent once and never kept here.
+// Local sign-in (ADR-008 Decision 2). The password is sent once and never kept here; the
+// collector checks it (ADR-015 Decision 1).
 import { LogIn, ShieldCheck } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
-import { api, ApiFailed, AuditUnavailable, Rejected } from "../api/client";
+import { api, AuditUnavailable, MustWait, NoPassword, Rejected, SignedOut } from "../api/client";
+
+const setCommand = 'sudo "/Library/Application Support/Thadam/bin/thadam-collector" set-password';
+
+function seconds(n: number): string {
+  return n < 120 ? `${n} second${n === 1 ? "" : "s"}` : `${Math.ceil(n / 60)} minutes`;
+}
 
 export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
   const [password, setPassword] = useState("");
@@ -19,11 +26,12 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
       (err: unknown) => {
         setBusy(false);
         setMessage(
-          err instanceof AuditUnavailable ? err.message : err instanceof ApiFailed && err.message.includes("429")
-            ? "Too many attempts. Wait a minute and try again."
-            : err instanceof Rejected
-              ? "Enter your password."
-              : "That password is not right.",
+          err instanceof AuditUnavailable ? err.message
+            : err instanceof NoPassword ? "No password is set yet. Set one in Terminal with the command below."
+              : err instanceof MustWait ? `Too many wrong passwords. Try again in ${seconds(err.seconds)}.`
+                : err instanceof Rejected ? "Enter your password."
+                  : err instanceof SignedOut ? "That password is not right."
+                    : "Sign-in failed. Try again.",
         );
       },
     );
@@ -43,7 +51,7 @@ export function SignIn({ onSignedIn }: { onSignedIn: () => void }) {
           onChange={(e) => { setPassword(e.target.value); }} required maxLength={256} />
         {message !== undefined && <p className="sub error" role="alert">{message}</p>}
         <button type="submit" className="btn primary" disabled={busy}><LogIn className="ic" aria-hidden="true" />Sign in</button>
-        <p className="sub">Set the password with <code className="mono">thadam-api set-password</code>.</p>
+        <p className="sub">Set or change the password in Terminal: <code className="mono">{setCommand}</code></p>
       </form>
     </main>
   );

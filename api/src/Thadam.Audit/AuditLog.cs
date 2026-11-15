@@ -124,7 +124,78 @@ public sealed class AuditLog : IAsyncDisposable
         }
     }
 
-    public Task CheckAvailableAsync(CancellationToken ct) => _collector?.PingAsync(ct) ?? Task.CompletedTask;
+    /// <summary>True when the collector writes this log and checks sign-in (ADR-015 Decision 1).</summary>
+    public bool UsesCollector => _collector is not null;
+
+    /// <summary>Throws <see cref="AuditUnavailableException"/> when entries cannot be written now.</summary>
+    public Task CheckAvailableAsync(string? session, CancellationToken ct) =>
+        _collector?.PingAsync(session, ct) ?? Task.CompletedTask;
+
+    /// <summary>
+    /// False only when the collector says the session has ended; an unreachable collector is
+    /// reported by the next audited action, not here.
+    /// </summary>
+    public async Task<bool> SessionLiveAsync(string? session, CancellationToken ct)
+    {
+        if (_collector is null) return true;
+        if (session is null) return false;
+        try
+        {
+            await _collector.PingAsync(session, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (AuditSessionEndedException)
+        {
+            return false;
+        }
+        catch (AuditUnavailableException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>Signs in through the collector, which checks the password and writes the entry.</summary>
+    public async Task<SignInResult> SignInThroughCollectorAsync(string password, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        if (_collector is null) throw new InvalidOperationException("no collector");
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await _collector.SignInAsync(password, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>Ends the session and records it. An already-ended session records nothing.</summary>
+    public async Task SignOutAsync(string? session, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_collector is null)
+            {
+                await AppendLockedAsync(AuditAction.SignOut, "", AuditOutcome.Succeeded, null, ct).ConfigureAwait(false);
+                return;
+            }
+            if (session is null) return;
+            try
+            {
+                await _collector.SignOutAsync(session, ct).ConfigureAwait(false);
+            }
+            catch (AuditSessionEndedException)
+            {
+                // Already gone: nothing to end, nothing to record.
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
 
     private async Task RefreshReaderAsync(CancellationToken ct)
     {
@@ -154,14 +225,18 @@ public sealed class AuditLog : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Appends an entry. With the collector, <paramref name="session"/> must be live; it is
+    /// written as that session's actor. The local log ignores it.
+    /// </summary>
     public async Task<AuditEntry> AppendAsync(
-        AuditAction action, string targetId, AuditOutcome outcome, CancellationToken ct)
+        AuditAction action, string targetId, AuditOutcome outcome, string? session, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(targetId);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return await AppendLockedAsync(action, targetId, outcome, ct).ConfigureAwait(false);
+            return await AppendLockedAsync(action, targetId, outcome, session, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -174,7 +249,7 @@ public sealed class AuditLog : IAsyncDisposable
     /// review entry for the event; a call that would not change it writes nothing.
     /// Returns true when an entry was written.
     /// </summary>
-    public async Task<bool> SetReviewedAsync(string eventId, bool reviewed, CancellationToken ct)
+    public async Task<bool> SetReviewedAsync(string eventId, bool reviewed, string? session, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrEmpty(eventId);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -187,7 +262,7 @@ public sealed class AuditLog : IAsyncDisposable
                 return false;
             }
             var action = reviewed ? AuditAction.FlagReviewed : AuditAction.FlagReopened;
-            await AppendLockedAsync(action, eventId, AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+            await AppendLockedAsync(action, eventId, AuditOutcome.Succeeded, session, ct).ConfigureAwait(false);
             return true;
         }
         finally
@@ -200,7 +275,7 @@ public sealed class AuditLog : IAsyncDisposable
     /// <see cref="SetReviewedAsync"/> for several events under one hold of the writer, so no
     /// other entry lands between them. Returns how many entries were written.
     /// </summary>
-    public async Task<int> SetReviewedManyAsync(IReadOnlyList<string> eventIds, bool reviewed, CancellationToken ct)
+    public async Task<int> SetReviewedManyAsync(IReadOnlyList<string> eventIds, bool reviewed, string? session, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(eventIds);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -216,7 +291,7 @@ public sealed class AuditLog : IAsyncDisposable
                 {
                     continue;
                 }
-                await AppendLockedAsync(action, eventId, AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+                await AppendLockedAsync(action, eventId, AuditOutcome.Succeeded, session, ct).ConfigureAwait(false);
                 written++;
             }
             return written;
@@ -251,6 +326,44 @@ public sealed class AuditLog : IAsyncDisposable
                 set.Add(r.GetString(0));
             }
             return set;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// For each of <paramref name="eventIds"/> that is reviewed now, the entry that reviewed it:
+    /// who and when, shown in the Reviewed list (ADR-015 Decision 1).
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, AuditEntry>> ReviewsAsync(
+        IReadOnlyCollection<string> eventIds, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(eventIds);
+        var found = new Dictionary<string, AuditEntry>(StringComparer.Ordinal);
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await RefreshReaderAsync(ct).ConfigureAwait(false);
+            if (_connection is null) return found;
+            await using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT seq, audit_id, ts_us, actor_id, action, target_id, outcome FROM audit
+                WHERE target_id = $id AND action IN ('flag_reviewed', 'flag_reopened') AND outcome = 'succeeded'
+                ORDER BY seq DESC LIMIT 1
+                """;
+            var id = cmd.Parameters.Add("$id", SqliteType.Text);
+            foreach (var eventId in eventIds.Distinct(StringComparer.Ordinal))
+            {
+                id.Value = eventId;
+                await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                if (await r.ReadAsync(ct).ConfigureAwait(false) && r.GetString(4) == "flag_reviewed")
+                {
+                    found[eventId] = Read(r);
+                }
+            }
+            return found;
         }
         finally
         {
@@ -340,10 +453,13 @@ public sealed class AuditLog : IAsyncDisposable
     }
 
     private async Task<AuditEntry> AppendLockedAsync(
-        AuditAction action, string targetId, AuditOutcome outcome, CancellationToken ct)
+        AuditAction action, string targetId, AuditOutcome outcome, string? session, CancellationToken ct)
     {
         if (_collector is not null)
-            return await _collector.AppendAsync(action, targetId, outcome, ct).ConfigureAwait(false);
+        {
+            if (session is null) throw new AuditSessionEndedException();
+            return await _collector.AppendAsync(session, action, targetId, outcome, ct).ConfigureAwait(false);
+        }
         await using var tx = (SqliteTransaction)await _conn.BeginTransactionAsync(ct).ConfigureAwait(false);
         await using var last = _conn.CreateCommand();
         last.Transaction = tx;

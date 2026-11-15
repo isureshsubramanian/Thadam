@@ -1448,6 +1448,29 @@ fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
         .unwrap();
     assert!(!again.status.success());
 
+    // The password, as the owner sets it (from a pipe here; from the terminal with sudo live).
+    let credentials = tmp.path("credentials.json");
+    let set = Command::new(BIN)
+        .args(["set-password", "--credentials"])
+        .arg(&credentials)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .take()
+                .unwrap()
+                .write_all(b"made up pass phrase\n")?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    assert!(set.status.success());
+    assert!(
+        !std::fs::read_to_string(&credentials)
+            .unwrap()
+            .contains("made up")
+    );
+
     let socket = tmp.path("sock").join("audit.sock");
     let mut child = Command::new(BIN)
         .args(["run", "--source", "stdin", "--registry"])
@@ -1458,6 +1481,8 @@ fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
         .arg(&socket)
         .arg("--audit-db")
         .arg(&db)
+        .arg("--credentials")
+        .arg(&credentials)
         .arg("--api-bin")
         .arg(std::env::current_exe().unwrap())
         .stdin(Stdio::piped())
@@ -1470,11 +1495,18 @@ fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
         assert!(std::time::Instant::now() < deadline, "no audit socket");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let signed = audit_ask(
+        &socket,
+        "{\"contract\":\"thadam.audit-append.v2\",\"actor\":\"dev\",\"password\":\"made up pass phrase\"}\n",
+    );
+    let session = signed["session"].as_str().unwrap().to_string();
     let reply = audit_ask(
         &socket,
-        "{\"contract\":\"thadam.audit-append.v1\",\"actor\":\"dev\",\"action\":\"export\",\"target\":\"0193b000-0000-7000-8000-0000000000e1\",\"outcome\":\"succeeded\"}\n",
+        &format!(
+            "{{\"contract\":\"thadam.audit-append.v2\",\"session\":\"{session}\",\"action\":\"export\",\"target\":\"0193b000-0000-7000-8000-0000000000e1\",\"outcome\":\"succeeded\"}}\n"
+        ),
     );
-    assert_eq!(reply["seq"], 3);
+    assert_eq!(reply["seq"], 4);
     // Another program is refused; nothing is written.
     let refused = Command::new("/usr/bin/nc")
         .args(["-U"])
@@ -1486,7 +1518,7 @@ fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
             nc.stdin
                 .take()
                 .unwrap()
-                .write_all(b"{\"contract\":\"thadam.audit-append.v1\",\"ping\":true}\n")?;
+                .write_all(b"{\"contract\":\"thadam.audit-append.v2\",\"ping\":true}\n")?;
             nc.wait_with_output()
         })
         .unwrap();
@@ -1495,7 +1527,11 @@ fn the_api_appends_through_the_collector_after_the_old_log_is_imported() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     let log = thadam_store::AuditDb::open_read_only(&db).unwrap();
-    assert_eq!(log.len().unwrap(), 3);
+    assert_eq!(log.len().unwrap(), 4);
     assert_eq!(log.verify().unwrap().broken_at, None);
-    assert_eq!(log.entries().unwrap()[2].action, "export");
+    let entries = log.entries().unwrap();
+    assert_eq!(
+        (entries[2].action.as_str(), entries[3].action.as_str()),
+        ("sign_in", "export")
+    );
 }

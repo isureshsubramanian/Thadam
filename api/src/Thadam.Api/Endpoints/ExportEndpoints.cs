@@ -43,9 +43,9 @@ public static class ExportEndpoints
         [AsParameters] ExportArgs args, SearchRunner runner, ApiOptions options, [AsParameters] QueryEndpoints.Deps d,
         HttpContext http, CancellationToken ct)
     {
-        await d.Audit.CheckAvailableAsync(ct).ConfigureAwait(false);
+        await d.Audit.CheckAvailableAsync(d.Session, ct).ConfigureAwait(false);
         var exportId = Guid.CreateVersion7().ToString();
-        Task Audit(AuditOutcome outcome) => d.Audit.AppendAsync(AuditAction.Export, exportId, outcome, CancellationToken.None);
+        Task Audit(AuditOutcome outcome) => d.Audit.AppendAsync(AuditAction.Export, exportId, outcome, d.Session, CancellationToken.None);
 
         if (await Validation.CheckAsync(new ExportArgsValidator(), args, ct).ConfigureAwait(false) is { } bad)
         {

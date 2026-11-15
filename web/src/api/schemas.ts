@@ -95,6 +95,9 @@ export const flagItem = z.object({
   first: time,
   last: time,
   reviewed: z.boolean(),
+  /** Who marked it reviewed and when (ADR-015 Decision 1); null while open, or from an older API. */
+  reviewedBy: z.string().nullable().default(null),
+  reviewedAt: time.nullable().default(null),
 });
 export type FlagItem = z.infer<typeof flagItem>;
 
@@ -177,6 +180,8 @@ export const search = z.object({
 export type SearchResult = z.infer<typeof search>;
 
 export const errors = z.object({ errors: z.array(z.string()) });
+/** 429 from sign-in (ADR-015 Decision 1): seconds before the next attempt is checked. */
+export const wait = z.object({ retryAfter: z.number().int().positive().max(86_400) });
 /** Reply to a bulk review or reopen (ADR-014 Decision 5): how many flags changed state. */
 export const changed = z.object({ changed: count });
 /** 413 from /export (ADR-012 Decision 4): how many rows match (null: too many to count) and the limit. */

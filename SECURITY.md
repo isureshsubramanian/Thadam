@@ -45,8 +45,11 @@ These are the guarantees, and a way around any of them is a vulnerability:
   API, and hook messages carry the sender's identity as the kernel reports it.
 - **Sensitive values are not stored.** No file contents, no exec environment, no network
   payloads, and detected secrets in command lines and prompts are redacted.
-- **The dashboard is local and needs a password.** The API listens on 127.0.0.1 only and
-  only reads the store. Reviews go through the collector's append-only audit log.
+- **Reviews and sign-ins cannot be recorded without the password.** The collector checks
+  the dashboard password against a verifier only root can read or replace, and records a
+  review, search or export only under a session it issued at sign-in. A program running as
+  you cannot mark flags reviewed, or write audit entries, without knowing the password.
+- **The dashboard is local.** The API listens on 127.0.0.1 only and only reads the store.
 - **Gaps are visible.** When the collector is stopped, short of disk space or dropping
   events, the gap is recorded and shown.
 
@@ -54,6 +57,9 @@ These are the guarantees, and a way around any of them is a vulnerability:
 
 - An attacker who already has root or can load kernel code. Root can stop the collector
   and rewrite the store; Thadam can show that a gap happened but cannot prevent it.
+- A program running as you that reads a signed-in browser's cookies, or watches you type
+  the password. A session lasts until you sign out, change the password, the collector
+  restarts, or eight hours pass unused.
 - What the AI tools themselves do. Thadam records their behaviour; it does not judge or
   block it.
 - Attacks that need physical access to an unlocked Mac, or that need you to switch off

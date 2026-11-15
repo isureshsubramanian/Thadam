@@ -1,3 +1,6 @@
+using Thadam.Audit;
+using Thadam.Api.Security;
+using Microsoft.AspNetCore.Authentication;
 using Thadam.Store;
 using Thadam.Store.Queries;
 
@@ -45,8 +48,15 @@ public static class MetaEndpoints
     }
 
     private static async Task<IResult> MetaAsync(
-        ChainMonitor chain, ToolRegistry registry, SegmentIndex index, HttpContext http, CancellationToken ct)
+        ChainMonitor chain, ToolRegistry registry, SegmentIndex index, AuditLog audit, HttpContext http, CancellationToken ct)
     {
+        // The dashboard asks this first: a session the collector has ended (restart, new
+        // password) signs out here, rather than at the first audited action (ADR-015).
+        if (!await audit.SessionLiveAsync(SignInGate.Session(http.User), ct).ConfigureAwait(false))
+        {
+            await http.SignOutAsync().ConfigureAwait(false);
+            return Results.Unauthorized();
+        }
         var spans = await index.ListAsync(ct).ConfigureAwait(false);
         return Results.Json(new
         {

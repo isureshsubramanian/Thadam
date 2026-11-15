@@ -1,3 +1,4 @@
+using Thadam.Api.Security;
 using Thadam.Audit;
 using Thadam.Store.Queries;
 
@@ -27,8 +28,11 @@ public static class QueryEndpoints
     }
 
     /// <summary>The services every handler uses, bound as one argument.</summary>
-    public sealed record Deps(StoreQueries Queries, ToolRegistry Registry, AuditLog Audit, TimeProvider Time)
+    public sealed record Deps(StoreQueries Queries, ToolRegistry Registry, AuditLog Audit, TimeProvider Time, HttpContext Http)
     {
+        /// <summary>The signed-in session, which every audited write carries (ADR-015 Decision 1).</summary>
+        public string? Session => SignInGate.Session(Http.User);
+
         public async Task<IReadOnlySet<string>> ToolKeysAsync(CancellationToken ct) =>
             (await Registry.ToolsAsync(ct).ConfigureAwait(false)).Select(t => t.Key).ToHashSet(StringComparer.Ordinal);
 
@@ -102,10 +106,13 @@ public static class QueryEndpoints
             .ToList();
         if (filter is not null)
         {
-            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, d.Session, ct).ConfigureAwait(false);
         }
         var matching = listed.Where(i => after is null || i.LastSeq < after).Take(limit + 1).ToList();
         var page = matching.Take(limit).ToList();
+        var reviews = wantReviewed
+            ? await d.Audit.ReviewsAsync([.. page.Select(i => i.LastEventId)], ct).ConfigureAwait(false)
+            : new Dictionary<string, AuditEntry>();
         return Results.Json(new
         {
             range = Range(range),
@@ -123,6 +130,8 @@ public static class QueryEndpoints
                 first = Values.Time(i.FirstTsUs),
                 last = Values.Time(i.LastTsUs),
                 reviewed = i.Reviewed,
+                reviewedBy = reviews.GetValueOrDefault(i.LastEventId)?.ActorId,
+                reviewedAt = reviews.GetValueOrDefault(i.LastEventId) is { } r ? Values.Time(r.TsUs) : null,
             }),
             next = matching.Count > limit ? page[^1].LastSeq : (long?)null,
             total = (long?)listed.Count,
@@ -144,10 +153,10 @@ public static class QueryEndpoints
         var e = await d.Queries.FindEventAsync(eventId, ct).ConfigureAwait(false);
         if (e?.Severity is null)
         {
-            await d.Audit.AppendAsync(action, eventId, AuditOutcome.Failed, ct).ConfigureAwait(false);
+            await d.Audit.AppendAsync(action, eventId, AuditOutcome.Failed, d.Session, ct).ConfigureAwait(false);
             return Results.NotFound();
         }
-        await d.Audit.SetReviewedAsync(eventId, reviewed, ct).ConfigureAwait(false);
+        await d.Audit.SetReviewedAsync(eventId, reviewed, d.Session, ct).ConfigureAwait(false);
         return Results.NoContent();
     }
 
@@ -173,11 +182,11 @@ public static class QueryEndpoints
         {
             foreach (var id in missing)
             {
-                await d.Audit.AppendAsync(action, id, AuditOutcome.Failed, ct).ConfigureAwait(false);
+                await d.Audit.AppendAsync(action, id, AuditOutcome.Failed, d.Session, ct).ConfigureAwait(false);
             }
             return Results.NotFound();
         }
-        var changed = await d.Audit.SetReviewedManyAsync(ids, reviewed, ct).ConfigureAwait(false);
+        var changed = await d.Audit.SetReviewedManyAsync(ids, reviewed, d.Session, ct).ConfigureAwait(false);
         return Results.Json(new { changed });
     }
 
@@ -198,7 +207,7 @@ public static class QueryEndpoints
             .ToList();
         if (filter is not null)
         {
-            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+            await d.Audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, d.Session, ct).ConfigureAwait(false);
         }
         var matching = listed.Where(s => after is null || s.LastSeq < after).Take(limit + 1).ToList();
         var page = matching.Take(limit).ToList();

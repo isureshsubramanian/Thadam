@@ -13,6 +13,15 @@ internal static class Commands
     /// </summary>
     public static async Task<int> SetPasswordAsync(ApiOptions options, CancellationToken ct)
     {
+        if (options.AuditSocket is not null)
+        {
+            // Installed, the collector keeps the verifier where no user-level program can read
+            // or replace it, so only root can set it (ADR-015 Decision 1).
+            await Console.Error.WriteLineAsync(
+                "The collector checks the password. Set it with:\n" +
+                "    sudo \"/Library/Application Support/Thadam/bin/thadam-collector\" set-password".AsMemory(), ct).ConfigureAwait(false);
+            return 2;
+        }
         string password;
         if (Console.IsInputRedirected)
         {

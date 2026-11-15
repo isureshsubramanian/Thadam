@@ -6,6 +6,7 @@ pub mod audit;
 pub mod classify;
 pub mod collapse;
 pub mod coverage;
+pub mod credentials;
 pub mod diag;
 pub mod netflow;
 pub mod pairing;

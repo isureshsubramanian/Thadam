@@ -1,3 +1,4 @@
+using Thadam.Api.Security;
 using Thadam.Api.Search;
 using Thadam.Audit;
 using Thadam.Store.Search;
@@ -18,18 +19,19 @@ public static class SearchEndpoints
 
     private static async Task<IResult> SearchAsync(
         string? q, string? after, string? limit, SearchRunner runner, SearchIndex index, ToolRegistry registry, AuditLog audit,
-        TimeProvider time, CancellationToken ct)
+        TimeProvider time, HttpContext http, CancellationToken ct)
     {
+        var session = SignInGate.Session(http.User);
         var tools = await registry.ToolsAsync(ct).ConfigureAwait(false);
         var (query, error) = Parse(q, tools, time);
         var bad = error is not null ? error.Field : !Args.IsAfter(after) ? "after" : !Args.IsLimit(limit) ? "limit" : null;
         if (bad is not null || query is null)
         {
-            await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Failed, ct).ConfigureAwait(false);
+            await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Failed, session, ct).ConfigureAwait(false);
             return Validation.Invalid([bad ?? "q"]);
         }
         var result = await runner.RunAsync(query, Args.After(after), Args.Limit(limit), ct).ConfigureAwait(false);
-        await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+        await audit.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, session, ct).ConfigureAwait(false);
         var names = tools.ToDictionary(t => t.Key, t => t.DisplayName, StringComparer.Ordinal);
         return Results.Json(new
         {

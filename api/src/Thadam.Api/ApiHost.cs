@@ -1,9 +1,8 @@
 using System.Net;
 using System.Text.Json.Serialization;
-using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.FileProviders;
 using Thadam.Api.Endpoints;
 using Thadam.Api.Search;
@@ -19,15 +18,13 @@ namespace Thadam.Api;
 public static class ApiHost
 {
     private static readonly string[] AuditErrors = ["audit"];
+    private static readonly string[] SessionErrors = ["session"];
     private static readonly Action<ILogger, Exception?> AuditFailed =
         LoggerMessage.Define(LogLevel.Warning, new EventId(20), "Audit append unavailable");
 
-    public const string SignInPolicy = "sign-in";
     public const string CookieName = "thadam_session";
     public const string CsrfCookieName = "thadam_csrf";
     public const string CsrfHeader = "X-Thadam-Csrf";
-    /// <summary>ADR-008 Decision 2: at most 5 sign-in attempts a minute, then 429.</summary>
-    private const int SignInPermits = 5;
     /// <summary>A working day (estimate, ADR-008 Decision 2).</summary>
     private static readonly TimeSpan SessionLength = TimeSpan.FromHours(8);
 
@@ -65,6 +62,7 @@ public static class ApiHost
             ? AuditLog.OpenCollectorAsync(options.AuditPath, socket, Environment.UserName, time, ct)
             : AuditLog.OpenAsync(options.AuditPath, Environment.UserName, time, ct)).ConfigureAwait(false);
         builder.Services.AddSingleton(audit);
+        builder.Services.AddSingleton<SignInGate>();
         var store = new StoreFolder(options.StorePath);
         builder.Services.AddSingleton(store);
         var index = new SegmentIndex(store);
@@ -112,20 +110,6 @@ public static class ApiHost
             o.Cookie.SameSite = SameSiteMode.Strict;
             o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
         });
-        builder.Services.AddRateLimiter(o =>
-        {
-            o.AddFixedWindowLimiter(SignInPolicy, w =>
-            {
-                w.PermitLimit = SignInPermits;
-                w.Window = TimeSpan.FromMinutes(1);
-                w.QueueLimit = 0;
-            });
-            o.OnRejected = async (c, token) =>
-            {
-                c.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                await audit.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Denied, token).ConfigureAwait(false);
-            };
-        });
         builder.Services.ConfigureHttpJsonOptions(o =>
             o.SerializerOptions.Converters.Add(new JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.SnakeCaseLower)));
         builder.Services.AddProblemDetails();
@@ -148,6 +132,15 @@ public static class ApiHost
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 await context.Response.WriteAsJsonAsync(new { errors = AuditErrors }).ConfigureAwait(false);
             }
+            catch (AuditSessionEndedException)
+            {
+                // The collector no longer knows this session: sign out, so the dashboard asks
+                // for the password again (ADR-015 Decision 1).
+                if (context.Response.HasStarted) throw;
+                await context.SignOutAsync().ConfigureAwait(false);
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                await context.Response.WriteAsJsonAsync(new { errors = SessionErrors }).ConfigureAwait(false);
+            }
         });
         app.UseStatusCodePages();
         // The dashboard: static files from the same origin, so one cookie and no CORS
@@ -161,7 +154,6 @@ public static class ApiHost
         app.UseRouting();
         app.UseAuthentication();
         app.UseAuthorization();
-        app.UseRateLimiter();
 
         var api = app.MapGroup("/api/v1");
         SessionEndpoints.Map(api);

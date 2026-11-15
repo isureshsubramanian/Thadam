@@ -55,17 +55,26 @@ public sealed class AuditLogTests : IDisposable
         Assert.Equal(new AuditVerifyReport(0, null), await log.VerifyAsync(Ct));
         Assert.False(File.Exists(AuditPath));
         await using var collector = new FakeCollector(socket, AuditPath);
-        await log.CheckAvailableAsync(Ct);
-        var entry = await log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, Ct);
-        Assert.Equal(entry, Assert.Single(await log.EntriesAsync(Ct)));
-        Assert.Equal(1, entry.Seq);
+        await log.CheckAvailableAsync(null, Ct);
+        // Without a session the collector accepts nothing (ADR-015 Decision 1).
+        await Assert.ThrowsAsync<AuditSessionEndedException>(() => log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, null, Ct));
+        var signedIn = await log.SignInThroughCollectorAsync(ApiTestHost.Password, Ct);
+        Assert.Equal(SignInStatus.SignedIn, signedIn.Status);
+        var session = signedIn.Session;
+        var entry = await log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, session, Ct);
+        Assert.Equal(entry, (await log.EntriesAsync(Ct))[^1]);
+        Assert.Equal(2, entry.Seq);
         Assert.Equal(7, Guid.Parse(entry.AuditId).Version);
         Assert.True(entry.TsUs > 0);
-        Assert.True(await log.SetReviewedAsync("e-1", true, Ct));
-        Assert.False(await log.SetReviewedAsync("e-1", true, Ct));
-        Assert.True(await log.SetReviewedAsync("e-1", false, Ct));
-        Assert.False(await log.SetReviewedAsync("e-1", false, Ct));
-        Assert.Equal(3, (await log.EntriesAsync(Ct)).Count);
+        Assert.True(await log.SetReviewedAsync("e-1", true, session, Ct));
+        Assert.False(await log.SetReviewedAsync("e-1", true, session, Ct));
+        Assert.Equal("dev", Assert.Single(await log.ReviewsAsync(["e-1", "e-2"], Ct)).Value.ActorId);
+        Assert.True(await log.SetReviewedAsync("e-1", false, session, Ct));
+        Assert.False(await log.SetReviewedAsync("e-1", false, session, Ct));
+        Assert.Empty(await log.ReviewsAsync(["e-1"], Ct));
+        await log.SignOutAsync(session, Ct);
+        await Assert.ThrowsAsync<AuditSessionEndedException>(() => log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, session, Ct));
+        Assert.Equal(["sign_in", "search", "flag_reviewed", "flag_reopened", "sign_out"], (await log.EntriesAsync(Ct)).Select(e => e.Action));
         Assert.True((await log.VerifyAsync(Ct)).Ok);
     }
 
@@ -75,9 +84,9 @@ public sealed class AuditLogTests : IDisposable
         Directory.CreateDirectory(_dir);
         var socket = Path.Combine(_dir, "a.sock");
         await using var log = await AuditLog.OpenCollectorAsync(AuditPath, socket, "dev", TimeProvider.System, Ct);
-        await Assert.ThrowsAsync<AuditUnavailableException>(() => log.CheckAvailableAsync(Ct));
+        await Assert.ThrowsAsync<AuditUnavailableException>(() => log.CheckAvailableAsync(null, Ct));
         await using var collector = new FakeCollector(socket, AuditPath) { Error = "refused" };
-        var error = await Assert.ThrowsAsync<AuditUnavailableException>(() => log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, Ct));
+        var error = await Assert.ThrowsAsync<AuditUnavailableException>(() => log.SignInThroughCollectorAsync(ApiTestHost.Password, Ct));
         Assert.Contains("refused", error.Message, StringComparison.Ordinal);
         Assert.False(File.Exists(AuditPath));
     }
@@ -104,12 +113,12 @@ public sealed class AuditLogTests : IDisposable
     public async Task ReviewingTwiceWritesOnceAndReopenRestores()
     {
         await using var log = await AuditLog.OpenAsync(AuditPath, "dev", TimeProvider.System, Ct);
-        Assert.True(await log.SetReviewedAsync("e-1", reviewed: true, Ct));
-        Assert.False(await log.SetReviewedAsync("e-1", reviewed: true, Ct));
+        Assert.True(await log.SetReviewedAsync("e-1", reviewed: true, null, Ct));
+        Assert.False(await log.SetReviewedAsync("e-1", reviewed: true, null, Ct));
         Assert.Equal(["e-1"], await log.ReviewedEventsAsync(Ct));
-        Assert.True(await log.SetReviewedAsync("e-1", reviewed: false, Ct));
+        Assert.True(await log.SetReviewedAsync("e-1", reviewed: false, null, Ct));
         Assert.Empty(await log.ReviewedEventsAsync(Ct));
-        Assert.False(await log.SetReviewedAsync("e-2", reviewed: false, Ct));
+        Assert.False(await log.SetReviewedAsync("e-2", reviewed: false, null, Ct));
         Assert.Equal(["flag_reviewed", "flag_reopened"], (await log.EntriesAsync(Ct)).Select(e => e.Action));
         Assert.True((await log.VerifyAsync(Ct)).Ok);
     }
@@ -119,9 +128,9 @@ public sealed class AuditLogTests : IDisposable
     {
         await using (var log = await AuditLog.OpenAsync(AuditPath, "dev", TimeProvider.System, Ct))
         {
-            await log.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Failed, Ct);
-            await log.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Succeeded, Ct);
-            await log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, Ct);
+            await log.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Failed, null, Ct);
+            await log.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Succeeded, null, Ct);
+            await log.AppendAsync(AuditAction.Search, "", AuditOutcome.Succeeded, null, Ct);
         }
         using (var c = new SqliteConnection($"Data Source={AuditPath};Pooling=False"))
         {

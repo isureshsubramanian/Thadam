@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
-use thadam_collector::audit::AuditListener;
+use thadam_collector::audit::{Access, AuditListener};
 use thadam_collector::coverage::{self, Heartbeat};
+use thadam_collector::credentials::{self, CredentialFile};
 use thadam_collector::diag;
 use thadam_collector::pipeline::{Pipeline, Settings};
 use thadam_collector::registry::Registry;
@@ -38,7 +39,11 @@ const USAGE: &str = "usage:
                        [--audit-db <file>]          (default: the system audit log)
                        [--api-bin <path>]           (the program audit entries must come from;
                                                      default: the installed thadam-api)
+                       [--credentials <file>]       (the dashboard password's verifier;
+                                                     default: the system one)
                        [--log <file>]               (default: stderr; the file rotates at 1 MB, 5 kept)
+  thadam-collector set-password [--credentials <file>]
+                       (as root: sets the dashboard password and ends every session)
   thadam-collector import-audit --from <file> [--audit-db <file>]
                        (as root, once: copies the API's old audit log into an empty system one)
   thadam-collector check-registry <file>
@@ -58,6 +63,7 @@ fn main() -> ExitCode {
         Some("snapshot") => cmd_snapshot(&args[1..]),
         Some("install") => cmd_install(&args[1..]),
         Some("import-audit") => cmd_import_audit(&args[1..]),
+        Some("set-password") => cmd_set_password(&args[1..]),
         Some("uninstall") if args.len() == 1 => cmd_uninstall(),
         _ => Err(Failure::Usage(USAGE.to_string())),
     };
@@ -91,6 +97,7 @@ struct Options {
     audit_socket: Option<String>,
     audit_db: Option<String>,
     api_bin: Option<String>,
+    credentials: Option<String>,
     from: Option<String>,
     log: Option<String>,
 }
@@ -110,6 +117,7 @@ fn parse_options(args: &[String]) -> Result<Options, Failure> {
             "--audit-socket" => &mut o.audit_socket,
             "--audit-db" => &mut o.audit_db,
             "--api-bin" => &mut o.api_bin,
+            "--credentials" => &mut o.credentials,
             "--from" => &mut o.from,
             "--log" => &mut o.log,
             _ => return Err(Failure::Usage(USAGE.to_string())),
@@ -460,18 +468,24 @@ fn open_agent_socket(arg: Option<&str>, source: &str) -> Result<Option<AgentList
 fn open_audit_socket(o: &Options, source: &str) -> Result<Option<AuditListener>, Failure> {
     let db = Path::new(o.audit_db.as_deref().unwrap_or(thadam_core::AUDIT_DB));
     let api = Path::new(o.api_bin.as_deref().unwrap_or(thadam_core::API_BIN));
+    let mut access = Access::system();
+    if let Some(path) = &o.credentials {
+        access.credentials = path.into();
+    }
     match (o.audit_socket.as_deref(), source) {
         (Some("off"), _) | (None, "stdin") => Ok(None),
-        (Some(path), _) => AuditListener::bind(Path::new(path), db, api)
+        (Some(path), _) => AuditListener::bind(Path::new(path), db, api, access)
             .map(Some)
             .map_err(|e| Failure::Usage(format!("cannot listen for audit entries: {e}"))),
-        (None, _) => match AuditListener::bind(Path::new(thadam_core::AUDIT_SOCKET), db, api) {
-            Ok(l) => Ok(Some(l)),
-            Err(e) => {
-                diag!("thadam-collector: audit entries not accepted, cannot listen: {e}");
-                Ok(None)
+        (None, _) => {
+            match AuditListener::bind(Path::new(thadam_core::AUDIT_SOCKET), db, api, access) {
+                Ok(l) => Ok(Some(l)),
+                Err(e) => {
+                    diag!("thadam-collector: audit entries not accepted, cannot listen: {e}");
+                    Ok(None)
+                }
             }
-        },
+        }
     }
 }
 
@@ -493,6 +507,79 @@ fn cmd_import_audit(args: &[String]) -> Result<(), Failure> {
         .map_err(|e| Failure::Runtime(e.to_string()))?;
     println!("OK    {copied} audit entries copied; the old file is unchanged");
     Ok(())
+}
+
+/// Sets the dashboard password (ADR-015 Decision 1). Read from the terminal with echo off,
+/// twice, or as one line from a pipe; never from an argument, which other processes can see.
+fn cmd_set_password(args: &[String]) -> Result<(), Failure> {
+    let o = parse_options(args)?;
+    let path = o.credentials.as_deref().unwrap_or(thadam_core::CREDENTIALS);
+    if o.credentials.is_none() && thadam_collector::peer::euid() != 0 {
+        return Err(Failure::Usage(
+            "run set-password with sudo: the verifier is root-only".into(),
+        ));
+    }
+    let password = read_new_password()?;
+    let chars = password.chars().count();
+    if chars < thadam_core::MIN_PASSWORD {
+        return Err(Failure::Usage(format!(
+            "the password must be at least {} characters",
+            thadam_core::MIN_PASSWORD
+        )));
+    }
+    if chars > thadam_core::MAX_PASSWORD {
+        return Err(Failure::Usage(format!(
+            "the password must be at most {} characters",
+            thadam_core::MAX_PASSWORD
+        )));
+    }
+    let file = CredentialFile::create(&password, credentials::ITERATIONS)
+        .map_err(|e| Failure::Runtime(format!("cannot make the verifier: {}", e.kind())))?;
+    credentials::save(Path::new(path), &file)
+        .map_err(|e| Failure::Runtime(format!("cannot save the verifier: {}", e.kind())))?;
+    println!("OK    password set; any open dashboard session has ended, so sign in again");
+    Ok(())
+}
+
+fn read_new_password() -> Result<String, Failure> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    if !stdin.is_terminal() {
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| Failure::Runtime(format!("cannot read the password: {}", e.kind())))?;
+        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    let ask = |prompt: &str| -> Result<String, Failure> {
+        eprint!("{prompt}");
+        let _ = std::io::stderr().flush();
+        let tty = |arg: &str| {
+            fs::File::open("/dev/tty").and_then(|t| {
+                std::process::Command::new("/bin/stty")
+                    .arg(arg)
+                    .stdin(t)
+                    .status()
+            })
+        };
+        tty("-echo")
+            .map_err(|e| Failure::Runtime(format!("cannot turn echo off: {}", e.kind())))?;
+        let mut line = String::new();
+        let read = stdin.lock().read_line(&mut line);
+        // Echo comes back on whatever happened, before anything else is reported.
+        let _ = tty("echo");
+        eprintln!();
+        read.map_err(|e| Failure::Runtime(format!("cannot read the password: {}", e.kind())))?;
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    };
+    let first = ask("New dashboard password: ")?;
+    if ask("Again: ")? != first {
+        return Err(Failure::Usage(
+            "the two passwords differ; nothing changed".into(),
+        ));
+    }
+    Ok(first)
 }
 
 fn seed_from_snapshot(pipeline: &mut Pipeline) {

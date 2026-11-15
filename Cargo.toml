@@ -16,8 +16,10 @@ publish = false
 [workspace.dependencies]
 thadam-core = { path = "crates/thadam-core" }
 thadam-store = { path = "crates/thadam-store" }
+getrandom = "0.4.3"
 libc = "0.2.191"
 garde = { version = "0.23.0", default-features = false, features = ["derive"] }
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }

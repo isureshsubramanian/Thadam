@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 //! Kernel sender identity: std's `peer_cred` is unstable in Rust 1.99
-//! (ADR-011 Decision 3), and the sender's executable for the audit socket (ADR-013
-//! Decision 3). Keep these calls confined to this module.
+//! (ADR-011 Decision 3), the sender's executable for the audit socket (ADR-013
+//! Decision 3), and this process's own user. Keep these calls confined to this module.
 
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -89,6 +89,12 @@ pub fn exe_of(pid: u32) -> io::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
         &buf[..n],
     )))
+}
+
+/// This process's effective user: the owner a root-only file must have (ADR-015 Decision 1).
+pub fn euid() -> u32 {
+    // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -62,17 +62,25 @@ public sealed class SecurityTests(StoreFixture store)
     }
 
     [Fact]
-    public async Task SixTriesInAMinuteAre429()
+    public async Task AfterFiveWrongPasswordsTheNextWaitsUncheckedAndSaysHowLong()
     {
         await using var host = await ApiTestHost.StartAsync(store, Ct);
         var codes = new List<HttpStatusCode>();
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < 5; i++)
         {
             using var r = await ApiTestHost.SignInAsync(host.Client, "wrong password number " + i, Ct);
             codes.Add(r.StatusCode);
         }
+        // Even the right password waits: the wait cannot be skipped by guessing faster.
+        using var limited = await ApiTestHost.SignInAsync(host.Client, ApiTestHost.Password, Ct);
+        codes.Add(limited.StatusCode);
         Assert.Equal([.. Enumerable.Repeat(HttpStatusCode.Unauthorized, 5), HttpStatusCode.TooManyRequests], codes);
+        Assert.Equal(TimeSpan.FromSeconds(1), limited.Headers.RetryAfter?.Delta);
         Assert.Equal(("sign_in", "denied"), (await AuditAsync(host))[^1]);
+        // Another client is not locked out for long: after the wait, the right password works.
+        await Task.Delay(TimeSpan.FromSeconds(1.1), Ct);
+        using var later = await ApiTestHost.SignInAsync(host.NewClient(), ApiTestHost.Password, Ct);
+        Assert.Equal(HttpStatusCode.NoContent, later.StatusCode);
     }
 
     [Fact]

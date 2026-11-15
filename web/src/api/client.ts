@@ -40,6 +40,18 @@ export class TooMany extends Error {
   }
 }
 
+/** Sign-in turned away before the password was checked (ADR-015 Decision 1). */
+export class NoPassword extends Error {
+  override name = "NoPassword";
+  constructor() { super("no password set"); }
+}
+
+/** Too many wrong passwords: the next attempt is checked only after `seconds`. */
+export class MustWait extends Error {
+  override name = "MustWait";
+  constructor(readonly seconds: number) { super("wait"); }
+}
+
 /** Any other failure; the message names the status only. */
 export class ApiFailed extends Error {
   override name = "ApiFailed";
@@ -127,6 +139,25 @@ async function exportCsv(source: ExportSource): Promise<ExportFile> {
   return { blob: await res.blob(), fileName: fileName(res.headers.get("Content-Disposition")) };
 }
 
+/** Sign-in: a wrong password is SignedOut; no password set and waiting have their own errors. */
+async function signIn(password: string): Promise<void> {
+  const res = await fetch(`${base}/session`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-Thadam-Csrf": await csrf(), "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (res.status === 409) throw new NoPassword();
+  if (res.status === 429) {
+    const parsed = s.wait.safeParse(await res.json().catch(() => ({})));
+    throw new MustWait(parsed.success ? parsed.data.retryAfter : 60);
+  }
+  await checkAudit(res);
+  if (res.status === 401) throw new SignedOut("wrong password");
+  if (res.status === 400) throw new Rejected([]);
+  if (!res.ok) throw new ApiFailed(`HTTP ${res.status}`);
+}
+
 export interface RangeArgs {
   from: string;
   to: string;
@@ -134,7 +165,7 @@ export interface RangeArgs {
 }
 
 export const api = {
-  signIn: (password: string) => write("POST", "/session", { password }),
+  signIn,
   signOut: () => write("DELETE", "/session"),
   meta: (signal?: AbortSignal) => get(s.meta, "/meta", signal),
   coverage: (a: RangeArgs, signal?: AbortSignal) => get(s.coverage, `/coverage${query({ ...a })}`, signal),

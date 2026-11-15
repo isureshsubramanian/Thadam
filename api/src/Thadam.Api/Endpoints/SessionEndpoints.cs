@@ -27,8 +27,9 @@ public static class SessionEndpoints
         api.MapGet("/antiforgery", (HttpContext http, IAntiforgery af) =>
             Results.Json(new { token = af.GetAndStoreTokens(http).RequestToken }));
 
+        // Wrong passwords are limited by the sign-in gate (the collector, when installed), not
+        // by a shared rate limit that another local program could keep full (ADR-015).
         api.MapPost("/session", SignInAsync)
-            .RequireRateLimiting(ApiHost.SignInPolicy)
             .RequireCsrf()
             .Validate<SignInRequest, SignInValidator>();
 
@@ -38,25 +39,35 @@ public static class SessionEndpoints
     }
 
     private static async Task<IResult> SignInAsync(
-        SignInRequest body, HttpContext http, ApiOptions options, AuditLog audit, CancellationToken ct)
+        SignInRequest body, HttpContext http, SignInGate gate, CancellationToken ct)
     {
-        var stored = await Credentials.LoadAsync(options.CredentialsPath, ct).ConfigureAwait(false);
-        if (stored is null || !Credentials.Verify(body.Password, stored))
+        var result = await gate.SignInAsync(body.Password, ct).ConfigureAwait(false);
+        switch (result.Status)
         {
-            await audit.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Failed, ct).ConfigureAwait(false);
-            return Results.Unauthorized();
+            case SignInStatus.SignedIn:
+                var identity = new ClaimsIdentity(
+                    [new Claim(ClaimTypes.Name, Environment.UserName), new Claim(SignInGate.SessionClaim, result.Session!)],
+                    CookieAuthenticationDefaults.AuthenticationScheme);
+                await http.SignInAsync(new ClaimsPrincipal(identity)).ConfigureAwait(false);
+                return Results.NoContent();
+            case SignInStatus.NoPassword:
+                return Results.Json(new { errors = NoPassword }, statusCode: StatusCodes.Status409Conflict);
+            case SignInStatus.Wait:
+                http.Response.Headers.RetryAfter = result.RetryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return Results.Json(new { errors = Wait, retryAfter = result.RetryAfter }, statusCode: StatusCodes.Status429TooManyRequests);
+            default:
+                return Results.Unauthorized();
         }
-        var identity = new ClaimsIdentity(
-            [new Claim(ClaimTypes.Name, Environment.UserName)], CookieAuthenticationDefaults.AuthenticationScheme);
-        await audit.AppendAsync(AuditAction.SignIn, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
-        await http.SignInAsync(new ClaimsPrincipal(identity)).ConfigureAwait(false);
-        return Results.NoContent();
     }
+
+    private static readonly string[] NoPassword = ["no_password"];
+    private static readonly string[] Wait = ["wait"];
 
     private static async Task<IResult> SignOutAsync(HttpContext http, AuditLog audit, CancellationToken ct)
     {
+        var session = SignInGate.Session(http.User);
         await http.SignOutAsync().ConfigureAwait(false);
-        await audit.AppendAsync(AuditAction.SignOut, "", AuditOutcome.Succeeded, ct).ConfigureAwait(false);
+        await audit.SignOutAsync(session, ct).ConfigureAwait(false);
         return Results.NoContent();
     }
 }

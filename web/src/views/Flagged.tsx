@@ -19,7 +19,7 @@ const severities: (Severity | undefined)[] = [undefined, "high", "medium", "low"
 /** Session ids are time-ordered, so the random tail tells neighbours apart; the full id is in the title. */
 const shortId = (id: string): string => (id.length > 12 ? `…${id.slice(-12)}` : id);
 
-function Row({ f, selected, onToggle }: { f: FlagItem; selected: boolean; onToggle: () => void }) {
+function Row({ f, selected, reviewed, onToggle }: { f: FlagItem; selected: boolean; reviewed: boolean; onToggle: () => void }) {
   const what = ruleTitle[f.rule] ?? words(f.rule);
   return (
     <tr className={selected ? "sel" : undefined}>
@@ -34,6 +34,11 @@ function Row({ f, selected, onToggle }: { f: FlagItem; selected: boolean; onTogg
       <td title={utc(f.last)}>{when(f.last)}</td>
       <td className="num">{num(f.rows)}</td>
       <td className="num">{num(f.count)}</td>
+      {reviewed && (
+        <td title={f.reviewedAt === null ? undefined : utc(f.reviewedAt)}>
+          {f.reviewedBy === null ? <span className="muted">unknown</span> : <>{f.reviewedBy}{f.reviewedAt !== null && <span className="muted"> · {when(f.reviewedAt)}</span>}</>}
+        </td>
+      )}
       <td className="act">
         {f.sessionId !== null && (
           <IconButton label={`Open session ${f.sessionId} timeline`} onClick={() => { go({ view: "sessions", sessionId: f.sessionId ?? undefined }); }}>
@@ -141,11 +146,12 @@ export function Flagged({ range, onChanged }: { range: TimeRange; onChanged: () 
                   <th>Last ({zone})</th>
                   <th className="num">Rows</th>
                   <th className="num">Events</th>
+                  {!reviewing && <th>Reviewed by</th>}
                   <th><span className="vh">Open</span></th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((f) => <Row key={`${f.rule} ${f.eventId}`} f={f} selected={selected.has(f.eventId)} onToggle={() => { toggle(f.eventId); }} />)}
+                {items.map((f) => <Row key={`${f.rule} ${f.eventId}`} f={f} selected={selected.has(f.eventId)} reviewed={!reviewing} onToggle={() => { toggle(f.eventId); }} />)}
               </tbody>
             </table>
           </div>

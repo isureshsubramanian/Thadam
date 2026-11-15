@@ -10,9 +10,12 @@ publish.workspace = true
 thadam-core.workspace = true
 thadam-store.workspace = true
 garde.workspace = true
+getrandom.workspace = true
 libc.workspace = true
+pbkdf2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 signal-hook.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["parsing"] }

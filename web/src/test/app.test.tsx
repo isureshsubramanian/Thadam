@@ -49,6 +49,38 @@ describe("dashboard", () => {
     expect(screen.getByLabelText("Password")).toBeTruthy();
   });
 
+  it.each([
+    [{ status: 401 }, "That password is not right."],
+    [{ status: 409, body: { errors: ["no_password"] } }, "No password is set yet. Set one in Terminal with the command below."],
+    [{ status: 429, body: { errors: ["wait"], retryAfter: 8 } }, "Too many wrong passwords. Try again in 8 seconds."],
+    [{ status: 429, body: { errors: ["wait"], retryAfter: 300 } }, "Too many wrong passwords. Try again in 5 minutes."],
+  ])("says why sign-in was turned away (%o)", async (reply, text) => {
+    fake.install({ ...base, "GET /meta": { status: 401 }, "POST /session": reply });
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "synthetic password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", text);
+    expect(screen.getByText(/thadam-collector" set-password/)).toBeTruthy();
+  });
+
+  it("shows who reviewed a flag on the Reviewed tab", async () => {
+    const reviewed = { ...fake.flagItem, reviewed: true, reviewedBy: "reviewer-a", reviewedAt: "2026-11-11T10:00:00.000000Z" };
+    fake.install({
+      ...base,
+      "GET /flags": (call) => ({
+        status: 200,
+        body: { range: fake.overview.range, items: call.path.includes("status=reviewed") ? [reviewed] : [fake.flagItem], next: null },
+      }),
+    });
+    window.location.hash = "#/flagged";
+    render(<App />);
+    await screen.findByRole("button", { name: "Mark reviewed" });
+    expect(screen.queryByRole("columnheader", { name: "Reviewed by" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reviewed" }));
+    expect(await screen.findByRole("columnheader", { name: "Reviewed by" })).toBeTruthy();
+    expect(screen.getByText("reviewer-a").closest("td")?.textContent).toMatch(/^reviewer-a · /);
+  });
+
   it("shows the collector message when search cannot be audited", async () => {
     fake.install({ ...base, "GET /events": { status: 503, body: { errors: ["audit"] } } });
     window.location.hash = "#/search?q=since%3A7d";

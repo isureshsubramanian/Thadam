@@ -74,9 +74,10 @@ Releases and open it. Then:
    Extensions, Network Extensions).
 2. **Grant Full Disk Access** to `thadam-collector` (System Settings, Privacy & Security).
    Without it, macOS gives the collector no file events.
-3. **Set the dashboard password**:
-   `"/Library/Application Support/Thadam/app/thadam-api" set-password`, then run the
-   `thadam-api install` command the installer printed.
+3. **Set the dashboard password** (at least 15 characters). The collector keeps it in a
+   root-only file, so it is set with sudo:
+   `sudo "/Library/Application Support/Thadam/bin/thadam-collector" set-password`.
+   Setting it again signs every open dashboard out.
 4. **Name your AI tools** in the registry (below), then open <http://127.0.0.1:7341>.
 
 ### The registry
