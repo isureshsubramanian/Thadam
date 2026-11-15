@@ -8,14 +8,17 @@
 //! checks), but nothing can take one away.
 //!
 //! One request per connection, served one at a time: a single writer, and a few requests a
-//! minute (estimate).
+//! minute (estimate). So that no client can hold the socket and lock the API out (sign-in is
+//! audited), the sender is identified before anything is read, another program gets its
+//! refusal within `REFUSED_WAIT`, and the API has `IO_TIMEOUT` in all to send its line, not
+//! per read.
 
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thadam_core::{AuditCommand, AuditError, AuditReply, AuditRequest, MAX_AUDIT_LINE};
 use thadam_store::{AuditDb, StoreError};
@@ -24,8 +27,11 @@ use crate::peer::{exe_of, peer_of};
 use crate::run::now_us;
 use crate::source::agent::{Line, bind_owned_socket, read_line_limited};
 
-/// How long one client may take to send its line or read the reply (estimate).
+/// How long, in all, the API may take to send its line, and to read the reply (estimate).
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a refused sender's line is waited for, so that it reads its refusal rather than
+/// finding the connection closed while it writes (estimate).
+const REFUSED_WAIT: Duration = Duration::from_millis(200);
 
 pub struct AuditListener {
     listener: UnixListener,
@@ -64,20 +70,21 @@ impl AuditListener {
 
     fn answer(&mut self, stream: &UnixStream) -> AuditReply {
         let error = |error| AuditReply::Error { error };
-        // ORDERING: the request is read first, so a refused sender gets its reply instead of
-        // a connection closed while it writes. It then waits for the reply, so it is still
-        // alive while its identity is read.
-        let command = read_request(stream);
+        // ORDERING: the sender is identified while it is connected, before anything is read,
+        // so a program that is not the API cannot hold the socket for longer than
+        // `REFUSED_WAIT`. Its line is still read (briefly), so that it is not writing into a
+        // closed connection when it should be reading its refusal.
         let from_api = peer_of(stream)
             .and_then(|p| exe_of(p.pid))
             .is_ok_and(|exe| exe == self.api_bin);
         if !from_api {
+            let _ = read_request(stream, REFUSED_WAIT);
             crate::diag!(
                 "thadam-collector: audit request refused: sender is not the installed API"
             );
             return error(AuditError::Refused);
         }
-        let Some(command) = command else {
+        let Some(command) = read_request(stream, IO_TIMEOUT) else {
             return error(AuditError::Invalid);
         };
         match command {
@@ -128,15 +135,37 @@ pub fn open_log(db: &Path) -> Result<AuditDb, StoreError> {
     Ok(log)
 }
 
-fn read_request(stream: &UnixStream) -> Option<AuditCommand> {
-    stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
-    let mut reader = BufReader::new(stream);
+/// Reads one request line, giving up once `within` has passed since the call, however the
+/// sender spaces its bytes.
+fn read_request(stream: &UnixStream, within: Duration) -> Option<AuditCommand> {
+    let mut reader = BufReader::new(Deadline {
+        stream,
+        until: Instant::now() + within,
+    });
     let mut buf = Vec::new();
     match read_line_limited(&mut reader, &mut buf, MAX_AUDIT_LINE).ok()? {
         Line::Done => {}
         Line::TooLong | Line::End => return None,
     }
     serde_json::from_slice::<AuditRequest>(&buf).ok()?.command()
+}
+
+/// A reader whose every read waits only for the time left before `until`.
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    until: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
 }
 
 fn write_reply(mut stream: &UnixStream, reply: &AuditReply) -> io::Result<()> {
@@ -223,6 +252,46 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn a_client_that_trickles_bytes_is_cut_off_and_the_next_one_is_served() {
+        let dir = Dir::new();
+        let socket = start(&dir, &std::env::current_exe().unwrap());
+        let mut slow = UnixStream::connect(&socket).unwrap();
+        let started = Instant::now();
+        // One byte every 300 ms: each read is quick, but the whole line never arrives.
+        let mut cut_off = false;
+        for _ in 0..20 {
+            if slow.write_all(b" ").is_err() {
+                cut_off = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        let mut reply = String::new();
+        let _ = BufReader::new(&mut slow).read_line(&mut reply);
+        assert!(cut_off || reply == "{\"error\":\"invalid\"}\n", "{reply}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            ask(
+                &socket,
+                "{\"contract\":\"thadam.audit-append.v1\",\"ping\":true}\n"
+            ),
+            "{\"ok\":true}\n"
+        );
+    }
+
+    #[test]
+    fn a_silent_other_program_is_refused_quickly() {
+        let dir = Dir::new();
+        let socket = start(&dir, Path::new("/usr/bin/true"));
+        let mut silent = UnixStream::connect(&socket).unwrap();
+        let started = Instant::now();
+        let mut reply = String::new();
+        BufReader::new(&mut silent).read_line(&mut reply).unwrap();
+        assert_eq!(reply, "{\"error\":\"refused\"}\n");
+        assert!(started.elapsed() < IO_TIMEOUT);
     }
 
     #[test]
