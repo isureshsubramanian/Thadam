@@ -52,6 +52,31 @@ public sealed class MixedVersionTests
         Assert.Contains("internal", parsed.Flags);
     }
 
+    [Fact]
+    public async Task ExportsSpanBothVersionsStopAtTheirSeqAndCarryTheChainHash()
+    {
+        using var store = await SyntheticStore.CreateAsync(Ct);
+        var index = new SegmentIndex(store.Folder);
+        var queries = new StoreQueries(index);
+        var runner = new SearchRunner(index, new EmptyIndex());
+        var q = new SearchQuery { Session = "session-1" };
+        Assert.Equal(2, await queries.NewestSeqAsync(Ct));
+        Assert.Equal(2, await runner.CountAsync(q, 2, Ct));
+        var rows = await runner.RowsAsync(q, 2, Ct).ToListAsync(Ct);
+        Assert.Equal([1L, 2L], rows.Select(r => r.Event.Seq)); // oldest first
+        Assert.Equal("agent-1", rows[1].Event.AgentSessionId);
+        Assert.All(rows, r => Assert.Matches("^[0-9a-f]{64}$", r.Hash));
+        Assert.NotEqual(rows[0].Hash, rows[1].Hash);
+        // Pinned: a row after the export's seq is never in it.
+        Assert.Equal(1, await runner.CountAsync(q, 1, Ct));
+        Assert.Equal([1L], (await runner.RowsAsync(q, 1, Ct).ToListAsync(Ct)).Select(r => r.Event.Seq));
+        // The timeline's export, with and without internal rows, matches its count.
+        Assert.Equal(2, await queries.TimelineCountAsync(["session-1"], true, 2, Ct));
+        Assert.Equal(1, await queries.TimelineCountAsync(["session-1"], false, 2, Ct));
+        var timeline = await queries.TimelineRowsAsync(["session-1"], true, 2, Ct).ToListAsync(Ct);
+        Assert.Equal(rows.Select(r => r.Hash), timeline.Select(r => r.Hash));
+    }
+
     private sealed class EmptyIndex : ITextIndex
     {
         public long IndexedSeq => 0;

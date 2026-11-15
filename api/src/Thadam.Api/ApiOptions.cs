@@ -20,6 +20,9 @@ public sealed record ApiOptions(string StorePath, string RegistryPath, string Da
     /// <summary>The generated third-party notices, shipped with the API (served at /notices).</summary>
     public string NoticesPath { get; init; } = Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.txt");
 
+    /// <summary>Most rows one CSV export holds (ADR-012 Decision 4); tests lower it.</summary>
+    public int ExportMaxRows { get; init; } = Export.CsvExport.MaxRows;
+
     /// <summary>The defaults: the root-owned store and registry, the user's own API folder.</summary>
     public static ApiOptions Defaults() => new(
         Path.Combine(SystemFolder, "store"),

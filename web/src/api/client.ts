@@ -18,6 +18,14 @@ export class Rejected extends Error {
   }
 }
 
+/** An export over the row limit (ADR-012): nothing was produced. */
+export class TooMany extends Error {
+  override name = "TooMany";
+  constructor(readonly rows: number | null, readonly limit: number) {
+    super("too many rows");
+  }
+}
+
 /** Any other failure; the message names the status only. */
 export class ApiFailed extends Error {
   override name = "ApiFailed";
@@ -64,6 +72,35 @@ function query(params: Record<string, string | number | boolean | undefined | nu
   return text ? `?${text}` : "";
 }
 
+/** What an export covers: a search, or a session timeline (ADR-012 Decision 1). */
+export type ExportSource = { q: string } | { session: string; internal: boolean };
+
+export interface ExportFile {
+  blob: Blob;
+  fileName: string;
+}
+
+/** The file name the API gave, or a plain fallback; only a safe character set is kept. */
+function fileName(disposition: string | null): string {
+  const m = /filename="?([A-Za-z0-9._-]+)"?/.exec(disposition ?? "");
+  return m?.[1] ?? "thadam-export.csv";
+}
+
+async function exportCsv(source: ExportSource): Promise<ExportFile> {
+  const res = await fetch(`${base}/export${query({ ...source })}`, { credentials: "same-origin" });
+  if (res.status === 401) throw new SignedOut("signed out");
+  if (res.status === 413) {
+    const body = s.tooMany.parse(await res.json());
+    throw new TooMany(body.rows, body.limit);
+  }
+  if (res.status === 400) {
+    const parsed = s.errors.safeParse(await res.json().catch(() => ({})));
+    throw new Rejected(parsed.success ? parsed.data.errors : []);
+  }
+  if (!res.ok) throw new ApiFailed(`HTTP ${res.status}`);
+  return { blob: await res.blob(), fileName: fileName(res.headers.get("Content-Disposition")) };
+}
+
 export interface RangeArgs {
   from: string;
   to: string;
@@ -85,4 +122,5 @@ export const api = {
     get(s.timeline, `/sessions/${encodeURIComponent(id)}${query({ ...a })}`, signal),
   search: (q: string, after?: number | null, signal?: AbortSignal) =>
     get(s.search, `/events${query({ q, after })}`, signal),
+  exportCsv,
 };

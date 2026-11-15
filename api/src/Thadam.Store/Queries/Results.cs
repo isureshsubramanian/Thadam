@@ -90,3 +90,6 @@ public sealed record Overview(
 
 /// <summary>A page of results and the seq to continue after, or null at the end.</summary>
 public sealed record Page<T>(IReadOnlyList<T> Items, long? Next);
+
+/// <summary>A row as exported (ADR-012 Decision 2): the row and its chain hash in lowercase hex.</summary>
+public sealed record ExportRow(EventView Event, string Hash);

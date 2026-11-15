@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Thadam.Store.Queries;
@@ -98,6 +99,89 @@ public sealed class SearchRunner(SegmentIndex segments, ITextIndex index)
         var page = new Page<EventView>(rows.Count > StoreQueries.PageSize ? rows[..StoreQueries.PageSize] : rows, next);
         var hosts = acc is null ? null : await HostsAsync(q, spans, ct).ConfigureAwait(false);
         return new SearchResult(page, acc?.Build(), hosts, capped);
+    }
+
+    /// <summary>
+    /// How many rows an export of <paramref name="q"/> as of <paramref name="upToSeq"/> holds
+    /// (ADR-012 Decision 4), or null when the free text matched more index candidates than one
+    /// request examines, so no complete count exists.
+    /// </summary>
+    public async Task<long?> CountAsync(SearchQuery q, long upToSeq, CancellationToken ct)
+    {
+        if (await PlanAsync(q, upToSeq, ct).ConfigureAwait(false) is not { } plan)
+        {
+            return null;
+        }
+        long total = 0;
+        foreach (var (span, where) in plan)
+        {
+            await using var conn = await segments.OpenAsync(span, ct).ConfigureAwait(false);
+            await using var cmd = where.Command(conn, "SELECT count(*) FROM events WHERE {where}");
+            total += (long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L);
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// The rows <see cref="CountAsync"/> counted, oldest first, each with its chain hash.
+    /// Empty when no complete count exists; callers count first.
+    /// </summary>
+    public async IAsyncEnumerable<ExportRow> RowsAsync(
+        SearchQuery q, long upToSeq, [EnumeratorCancellation] CancellationToken ct)
+    {
+        if (await PlanAsync(q, upToSeq, ct).ConfigureAwait(false) is not { } plan)
+        {
+            yield break;
+        }
+        foreach (var (span, where) in plan)
+        {
+            await using var conn = await segments.OpenAsync(span, ct).ConfigureAwait(false);
+            var columns = StoreQueries.ExportColumns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false));
+            await using var cmd = where.Command(conn, $"SELECT {columns} FROM events WHERE {{where}} ORDER BY seq");
+            await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await r.ReadAsync(ct).ConfigureAwait(false))
+            {
+                yield return StoreQueries.ReadExportRow(r);
+            }
+        }
+    }
+
+    /// <summary>Each segment that can hold matches, oldest first, with its condition; null when capped.</summary>
+    private async Task<List<(SegmentSpan Span, Where Where)>?> PlanAsync(SearchQuery q, long upToSeq, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(q);
+        var spans = q.Range is { } range
+            ? await segments.OverlappingAsync(range, ct).ConfigureAwait(false)
+            : await segments.ListAsync(ct).ConfigureAwait(false);
+        var oldestFirst = spans.OrderBy(s => s.FirstSeq).ToList();
+        var indexedSeq = index.IndexedSeq;
+        var indexedText = q.IndexedText.ToList();
+        IReadOnlyList<long>? candidates = null;
+        if (indexedText.Count > 0 && indexedSeq > 0)
+        {
+            candidates = await index.MatchAsync(
+                SearchParser.FtsQuery(indexedText), Math.Min(upToSeq + 1, indexedSeq + 1), CandidateCap, ct).ConfigureAwait(false);
+            if (candidates.Count >= CandidateCap)
+            {
+                return null;
+            }
+        }
+        var plan = new List<(SegmentSpan, Where)>();
+        for (var i = 0; i < oldestFirst.Count; i++)
+        {
+            var span = oldestFirst[i];
+            if (span.FirstSeq > upToSeq)
+            {
+                break;
+            }
+            var spanEnd = i + 1 < oldestFirst.Count ? oldestFirst[i + 1].FirstSeq - 1 : long.MaxValue;
+            if (SegmentWhere(q, indexedText, candidates, indexedSeq, span.FirstSeq, spanEnd, long.MinValue) is { } where)
+            {
+                where.Add($"seq <= {where.Param(upToSeq)}");
+                plan.Add((span, where));
+            }
+        }
+        return plan;
     }
 
     /// <summary>

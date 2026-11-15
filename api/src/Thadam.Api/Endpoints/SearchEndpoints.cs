@@ -21,10 +21,7 @@ public static class SearchEndpoints
         TimeProvider time, CancellationToken ct)
     {
         var tools = await registry.ToolsAsync(ct).ConfigureAwait(false);
-        string? Resolve(string name) => tools.FirstOrDefault(t =>
-            t.Key == name || string.Equals(t.DisplayName, name, StringComparison.OrdinalIgnoreCase))?.Key;
-
-        var (query, error) = SearchParser.Parse(q, Resolve, time.GetUtcNow());
+        var (query, error) = Parse(q, tools, time);
         var bad = error is not null ? error.Field : !Args.IsAfter(after) ? "after" : null;
         if (bad is not null || query is null)
         {
@@ -53,5 +50,13 @@ public static class SearchEndpoints
             items = result.Page.Items.Select(e => QueryEndpoints.Event(e, key => names.GetValueOrDefault(key, key))),
             next = result.Page.Next,
         });
+    }
+
+    /// <summary>Parses <paramref name="q"/>, resolving tool names to registry keys. Shared with export.</summary>
+    internal static (SearchQuery? Query, SearchError? Error) Parse(string? q, IReadOnlyList<ToolName> tools, TimeProvider time)
+    {
+        string? Resolve(string name) => tools.FirstOrDefault(t =>
+            t.Key == name || string.Equals(t.DisplayName, name, StringComparison.OrdinalIgnoreCase))?.Key;
+        return SearchParser.Parse(q, Resolve, time.GetUtcNow());
     }
 }

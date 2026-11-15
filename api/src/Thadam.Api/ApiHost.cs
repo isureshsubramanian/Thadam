@@ -151,6 +151,7 @@ public static class ApiHost
         MetaEndpoints.Map(api);
         QueryEndpoints.Map(api);
         SearchEndpoints.Map(api);
+        ExportEndpoints.Map(api);
         // Licence notices are readable without signing in (ADR-008 Dependencies).
         app.MapGet("/notices", () => File.Exists(options.NoticesPath)
             ? Results.File(options.NoticesPath, "text/plain; charset=utf-8")

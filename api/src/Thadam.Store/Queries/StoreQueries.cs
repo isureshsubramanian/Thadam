@@ -23,6 +23,15 @@ public sealed class StoreQueries(SegmentIndex index)
         ? ", agent_session_id, transcript"
         : ", NULL AS agent_session_id, NULL AS transcript");
 
+    /// <summary>The row columns plus the chain hash, last (ADR-012 Decision 2).</summary>
+    internal static string ExportColumns(int version) => Columns(version) + ", hash";
+
+    internal static ExportRow ReadExportRow(SqliteDataReader r) =>
+        new(ReadEvent(r), Convert.ToHexStringLower(r.GetFieldValue<byte[]>(r.FieldCount - 1)));
+
+    private const string NotInternal =
+        " AND instr(',' || flags || ',', ',tool_internal,') = 0 AND instr(',' || flags || ',', ',internal,') = 0";
+
     internal const string FlaggedCondition =
         "(flags != '' OR detections != '' OR outcome IN ('denied_by_agent', 'denied_by_user', 'denied_by_os', 'never_ran'))";
 
@@ -225,7 +234,7 @@ public sealed class StoreQueries(SegmentIndex index)
         {
             return new Page<EventView>(rows, null);
         }
-        var internalClause = includeInternal ? "" : " AND instr(',' || flags || ',', ',tool_internal,') = 0 AND instr(',' || flags || ',', ',internal,') = 0";
+        var internalClause = includeInternal ? "" : NotInternal;
         foreach (var span in (await index.ListAsync(ct).ConfigureAwait(false)).OrderBy(s => s.FirstSeq))
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
@@ -251,6 +260,74 @@ public sealed class StoreQueries(SegmentIndex index)
         return rows.Count > PageSize
             ? new Page<EventView>(rows[..PageSize], rows[PageSize - 1].Seq)
             : new Page<EventView>(rows, null);
+    }
+
+    /// <summary>The newest kept row's seq, or 0 for an empty store: what an export is "as of".</summary>
+    public async Task<long> NewestSeqAsync(CancellationToken ct)
+    {
+        long newest = 0;
+        foreach (var span in await index.ListAsync(ct).ConfigureAwait(false))
+        {
+            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT coalesce(max(seq), 0) FROM events";
+            newest = Math.Max(newest, (long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L));
+        }
+        return newest;
+    }
+
+    /// <summary>How many rows a timeline export as of <paramref name="upToSeq"/> holds (ADR-012).</summary>
+    public async Task<long> TimelineCountAsync(
+        IReadOnlyList<string> sessionIds, bool includeInternal, long upToSeq, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        long total = 0;
+        if (sessionIds.Count == 0)
+        {
+            return total;
+        }
+        foreach (var span in await index.ListAsync(ct).ConfigureAwait(false))
+        {
+            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
+            await using var cmd = TimelineCommand(conn, "count(*)", sessionIds, includeInternal, upToSeq);
+            total += (long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L);
+        }
+        return total;
+    }
+
+    /// <summary>The rows <see cref="TimelineCountAsync"/> counted, oldest first, with chain hashes.</summary>
+    public async IAsyncEnumerable<ExportRow> TimelineRowsAsync(
+        IReadOnlyList<string> sessionIds, bool includeInternal, long upToSeq,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(sessionIds);
+        if (sessionIds.Count == 0)
+        {
+            yield break;
+        }
+        foreach (var span in (await index.ListAsync(ct).ConfigureAwait(false)).OrderBy(s => s.FirstSeq))
+        {
+            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
+            var columns = ExportColumns(await StoreFolder.SegmentVersionAsync(conn, ct).ConfigureAwait(false));
+            await using var cmd = TimelineCommand(conn, columns, sessionIds, includeInternal, upToSeq);
+            cmd.CommandText += " ORDER BY seq";
+            await using var r = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await r.ReadAsync(ct).ConfigureAwait(false))
+            {
+                yield return ReadExportRow(r);
+            }
+        }
+    }
+
+    private static SqliteCommand TimelineCommand(
+        SqliteConnection conn, string select, IReadOnlyList<string> sessionIds, bool includeInternal, long upToSeq)
+    {
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT {select} FROM events WHERE session_id IN ({InList(sessionIds.Count)}) AND seq <= $upTo"
+            + (includeInternal ? "" : NotInternal);
+        AddList(cmd, sessionIds);
+        cmd.Parameters.AddWithValue("$upTo", upToSeq);
+        return cmd;
     }
 
     /// <summary>The row with this event ID, from any kept segment.</summary>

@@ -111,6 +111,44 @@ describe("dashboard", () => {
     expect(writeText).toHaveBeenCalledWith("/Users/dev/.cli-agent/a-51c2.jsonl");
   });
 
+  it("Export CSV saves the file the API names, and carries a text label", async () => {
+    const calls = fake.install({
+      ...base,
+      "GET /events": { status: 200, body: fake.search },
+      "GET /export": {
+        status: 200,
+        text: "seq,event_id\r\n40,x\r\n",
+        headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="thadam-export-20261115T0612Z-s40.csv"' },
+      },
+    });
+    const createObjectURL = vi.fn(() => "blob:synthetic");
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    window.location.hash = `#/search?q=${encodeURIComponent("tool:cli_agent")}`;
+    render(<App />);
+    const button = await screen.findByRole("button", { name: "Export CSV" });
+    fireEvent.click(button);
+    await waitFor(() => { expect(click).toHaveBeenCalled(); });
+    const anchor = click.mock.contexts[0] as HTMLAnchorElement;
+    expect(anchor.download).toBe("thadam-export-20261115T0612Z-s40.csv");
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(calls.find((c) => c.path.startsWith("/export"))?.path).toBe("/export?q=tool%3Acli_agent");
+  });
+
+  it("an export over the limit says how many rows match and produces no file", async () => {
+    fake.install({
+      ...base,
+      "GET /sessions/s-b1": { status: 200, body: fake.timeline },
+      "GET /export": { status: 413, body: { errors: ["rows"], rows: 250000, limit: 100000 } },
+    });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    window.location.hash = "#/sessions/s-b1";
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Export CSV" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("250,000 rows match; the limit is 100,000. Narrow the time range or add a filter.");
+    expect(click).not.toHaveBeenCalled();
+  });
+
   it("a rejected search names the field, not the text typed", async () => {
     fake.install({ ...base, "GET /events": { status: 400, body: { errors: ["q.tool"] } } });
     window.location.hash = `#/search?q=${encodeURIComponent("tool:secret_name")}`;

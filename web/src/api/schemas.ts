@@ -166,4 +166,6 @@ export const search = z.object({
 export type SearchResult = z.infer<typeof search>;
 
 export const errors = z.object({ errors: z.array(z.string()) });
+/** 413 from /export (ADR-012 Decision 4): how many rows match (null: too many to count) and the limit. */
+export const tooMany = z.object({ errors: z.array(z.string()), rows: count.nullable(), limit: count });
 export const token = z.object({ token: z.string() });

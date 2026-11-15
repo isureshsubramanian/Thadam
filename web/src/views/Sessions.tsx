@@ -4,6 +4,7 @@ import { useState } from "react";
 import { api } from "../api/client";
 import type { Session } from "../api/schemas";
 import { EventTable } from "../app/events";
+import { ExportButton } from "../app/ExportButton";
 import { num, when } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { href } from "../app/route";
@@ -87,6 +88,7 @@ function Timeline({ sessionId }: { sessionId: string }) {
       <div className="row">
         <input id="internal" type="checkbox" checked={internal} onChange={(e) => { setInternal(e.target.checked); }} />
         <label htmlFor="internal">Show tool-internal activity (the tool&apos;s own state folder and helper sessions)</label>
+        <ExportButton source={{ session: sessionId, internal }} />
       </div>
       <section className="card">
         {page.items === undefined ? page.loading && <Loading /> : page.items.length === 0 ? <Empty>No rows.</Empty> : <EventTable events={page.items} showTool showDay />}

@@ -54,7 +54,7 @@ public sealed class ApiTestHost : IAsyncDisposable
     }
 
     /// <summary>A server over any store folder (the benchmark's).</summary>
-    public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct)
+    public static async Task<ApiTestHost> StartAsync(string storeFolder, CancellationToken ct, int? exportMaxRows = null)
     {
         var dataDir = Path.Combine(Path.GetTempPath(), $"thadam-api-test-{Guid.NewGuid():N}");
         // A synthetic dashboard and notices file, so tests don't depend on the web build.
@@ -65,6 +65,7 @@ public sealed class ApiTestHost : IAsyncDisposable
         {
             WebDir = webDir,
             NoticesPath = Path.Combine(dataDir, "notices.txt"),
+            ExportMaxRows = exportMaxRows ?? Export.CsvExport.MaxRows,
         };
         await File.WriteAllTextAsync(options.NoticesPath, "synthetic notices", ct);
         await Credentials.SaveAsync(options.CredentialsPath, Credentials.Create(Password), ct);

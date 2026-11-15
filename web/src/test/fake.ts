@@ -8,7 +8,7 @@ export interface Call {
   headers: Record<string, string>;
 }
 
-type Reply = { status: number; body?: unknown };
+type Reply = { status: number; body?: unknown; text?: string; headers?: Record<string, string> };
 export type Routes = Record<string, Reply | ((call: Call) => Reply)>;
 
 export const meta = {
@@ -85,6 +85,16 @@ const event = {
   transcript: null,
 };
 
+export const search = {
+  range: null,
+  index: { indexedSeq: 40 },
+  partial: false,
+  summary: null,
+  hosts: [],
+  items: [event],
+  next: null,
+};
+
 /** A session timeline with what the OS saw and what the tool's hook reported (ADR-011). */
 export const timeline = {
   session: { sessionId: "s-b1", tool: "cli_agent", displayName: "CLI agent", parentSessionId: null, project: "/Users/dev/projects/sample-app", first: "2026-11-11T09:00:00.000000Z", last: "2026-11-11T09:02:00.000000Z", rows: 3, events: 3 },
@@ -111,7 +121,8 @@ export function install(routes: Routes): Call[] {
     });
     const found = key === undefined ? undefined : routes[key];
     const reply = found === undefined ? { status: 404 } : typeof found === "function" ? found(call) : found;
-    return Promise.resolve(new Response(reply.body === undefined ? null : JSON.stringify(reply.body), { status: reply.status }));
+    const body = reply.text ?? (reply.body === undefined ? null : JSON.stringify(reply.body));
+    return Promise.resolve(new Response(body, { status: reply.status, ...(reply.headers ? { headers: reply.headers } : {}) }));
   });
   return calls;
 }
