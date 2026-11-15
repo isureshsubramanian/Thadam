@@ -166,8 +166,13 @@ if [[ "$notarize" == 1 ]]; then
     xcrun stapler validate "$pkg"
     spctl --assess --type install -vv "$pkg"
     git commit -q -m "chore(release): $version" -- Cargo.toml Cargo.lock
-    git tag -a "v$version" -m "Thadam $version"
     bumped=0
+    # Tags may be signed with a key that needs a touch; the package and commit stand either way.
+    if ! git tag -a "v$version" -m "Thadam $version"; then
+        echo "Built $pkg and committed $version, but the tag was not made. Tag it with:" >&2
+        echo "    git tag -a v$version -m \"Thadam $version\" $(git rev-parse --short HEAD)" >&2
+        exit 1
+    fi
     echo "Committed and tagged v$version (not pushed)."
 else
     pkgutil --check-signature "$pkg" | sed -n '1,4p'
