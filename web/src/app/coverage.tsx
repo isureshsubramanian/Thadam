@@ -15,6 +15,11 @@ export function gapWords(g: Gap): string {
   }
 }
 
+/** Whole minutes; a gap shorter than one (a quick restart) is not shown as "0 min". */
+function minutes(seconds: number): string {
+  return seconds < 60 ? "under 1 min" : `${num(Math.floor(seconds / 60))} min`;
+}
+
 export function CoveragePill({ data }: { data: Coverage }) {
   const gaps = data.gaps.filter(g => g.reason !== "machine_off");
   const counts = new Map<string, number>();
@@ -22,7 +27,7 @@ export function CoveragePill({ data }: { data: Coverage }) {
   const title = [...counts].map(([reason, n]) => `${words(reason)}: ${String(n)}`).join("; ");
   const droppedOnly = gaps.length > 0 && gaps.every(g => g.reason === "dropped");
   return <span className={`pill ${gaps.length === 0 ? "ok" : "flag"}`} title={title}>
-    {gaps.length === 0 ? "Watching" : droppedOnly ? `Events dropped: ${num(gaps.reduce((n, g) => n + (g.missed ?? 0), 0))}` : `Not watching: ${num(Math.floor(data.notWatchedSeconds / 60))} min`}
+    {gaps.length === 0 ? "Watching" : droppedOnly ? `Events dropped: ${num(gaps.reduce((n, g) => n + (g.missed ?? 0), 0))}` : `Not watching: ${minutes(data.notWatchedSeconds)}`}
   </span>;
 }
 

@@ -198,6 +198,11 @@ describe("coverage and session labels", () => {
       expect(await screen.findByText((text) => text.includes(label))).toBeTruthy();
     }
   });
+  it("says under 1 min for a quick restart, not 0 min", async () => {
+    fake.install(coverageRoute([gap("not_running", "stopped")], 0));
+    render(<App />);
+    expect((await screen.findByText("Not watching: under 1 min")).className).toBe("pill flag");
+  });
   it("reports dropped events without counting minutes", async () => {
     fake.install(coverageRoute([gap("dropped", "os", 7), gap("machine_off")], 0));
     render(<App />);
