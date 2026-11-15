@@ -78,7 +78,7 @@ if [[ ! -s "$names" ]]; then
     exit 1
 fi
 hits="$(grep -rniwF -f "$names" --exclude-dir=.build --exclude-dir=bin --exclude-dir=obj --exclude-dir=node_modules \
-    --exclude-dir=dist --exclude=.name-gate.local crates/ macos/ api/ web/ scripts/ README.md Cargo.toml || true)"
+    --exclude-dir=dist --exclude=.name-gate.local crates/ macos/ api/ web/ scripts/ README.md SECURITY.md Cargo.toml || true)"
 # Two exceptions. The agent adapters (crates/thadam-hook/src/adapters/), the only place a
 # tool may be named (project rule 6, ADR-011 Decision 2). And data the language requires:
 # in .css files, the declaration of CSS's pointer-shape property with the values `pointer`
