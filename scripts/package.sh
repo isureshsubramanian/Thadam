@@ -10,8 +10,8 @@
 # scripts/signing.local). Notarization uses a notarytool keychain profile, named by
 # THADAM_NOTARY_PROFILE (default "thadam-notary"); its secret stays in the keychain.
 # --no-notarize builds a local test package (no secure timestamps, not notarized).
-# --without-network leaves the network extension out (until its Developer ID provisioning
-# profile exists).
+# --without-network leaves the network extension out. With it, the two Developer ID
+# provisioning profiles, named after the bundle ids, must be installed for Xcode.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/preflight.sh
@@ -81,26 +81,36 @@ fi
 
 if [[ "$network" == 1 ]]; then
     echo "== Network extension app"
+    # Manual signing with the Developer ID profiles: the automatic development profiles do not
+    # carry the "-systemextension" entitlement values. Each profile is named after its
+    # target's bundle id and must be installed in Xcode's profile folder.
     xcodebuild -quiet -project macos/ThadamNet.xcodeproj -scheme ThadamNet -configuration Release \
         -archivePath "$stage/ThadamNet.xcarchive" archive \
-        THADAM_NE_ENTITLEMENT_SUFFIX=-systemextension
+        THADAM_NE_ENTITLEMENT_SUFFIX=-systemextension \
+        CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$app_id" \
+        'PROVISIONING_PROFILE_SPECIFIER=$(PRODUCT_BUNDLE_IDENTIFIER)'
     cat > "$stage/export.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
     <key>method</key><string>developer-id</string>
-    <key>signingStyle</key><string>automatic</string>
+    <key>signingStyle</key><string>manual</string>
+    <key>signingCertificate</key><string>$app_id</string>
+    <key>provisioningProfiles</key><dict>
+        <key>com.nerttiyana.thadam.net</key><string>com.nerttiyana.thadam.net</string>
+        <key>com.nerttiyana.thadam.net.filter</key><string>com.nerttiyana.thadam.net.filter</string>
+    </dict>
 </dict></plist>
 PLIST
-    # Lets Xcode fetch the Developer ID provisioning profiles for the signed-in account.
     xcodebuild -quiet -exportArchive -archivePath "$stage/ThadamNet.xcarchive" \
-        -exportOptionsPlist "$stage/export.plist" -exportPath "$stage/export" \
-        -allowProvisioningUpdates
+        -exportOptionsPlist "$stage/export.plist" -exportPath "$stage/export"
     mkdir -p "$root/Applications"
     ditto "$stage/export/ThadamNet.app" "$root/Applications/ThadamNet.app"
 fi
 
 echo "== Package"
+# Extended attributes (provenance, quarantine) would otherwise ride along as "._" entries.
+xattr -cr "$root"
 mkdir -p "$stage/scripts"
 cp scripts/package/postinstall "$stage/scripts/"
 pkgbuild --analyze --root "$root" "$stage/components.plist" >/dev/null
