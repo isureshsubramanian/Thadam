@@ -8,6 +8,7 @@ import { Flagged } from "../views/Flagged";
 import { Overview } from "../views/Overview";
 import { Search } from "../views/Search";
 import { Sessions } from "../views/Sessions";
+import { HeaderCoverage } from "./coverage";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { num } from "./format";
 import { ranges, resolve, type RangeKey } from "./range";
@@ -15,6 +16,7 @@ import { href, useRoute, type Route } from "./route";
 import { SignedOutContext } from "./session";
 import { SignIn } from "./SignIn";
 import { IconButton } from "./ui";
+
 
 type Theme = "light" | "dark";
 
@@ -114,6 +116,7 @@ function Shell({ meta, onSignOut, onChanged }: { meta: Meta; onSignOut: () => vo
           </select>
         </label>
         <ChainBadge chain={meta.chain} />
+        <ErrorBoundary key={`${range.from}${range.to}`} area="coverage"><HeaderCoverage range={range} /></ErrorBoundary>
         <IconButton label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggleTheme}>
           {theme === "dark" ? <Sun className="ic" aria-hidden="true" /> : <Moon className="ic" aria-hidden="true" />}
         </IconButton>

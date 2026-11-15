@@ -1,11 +1,13 @@
 // Overview (mock-up view 1): KPI tiles, activity by tool, outside project by folder, hosts.
 import { api } from "../api/client";
 import type { Overview as Data } from "../api/schemas";
+import { CoverageCard } from "../app/coverage";
 import { bytes, categoryName, count, num, words } from "../app/format";
 import type { TimeRange } from "../app/range";
 import { go, type Route } from "../app/route";
 import { Empty, HostFlag, Loading, PageHead } from "../app/ui";
 import { useApi } from "../app/useApi";
+
 
 interface Kpi {
   label: string;
@@ -59,6 +61,7 @@ export function Overview({ range }: { range: TimeRange }) {
   const maxFolder = Math.max(1, ...data.outsideFolders.map((f) => f.records));
   return (
     <div className="stack">
+      <CoverageCard range={range} />
       <PageHead title="Overview" sub="All registered AI tools · rows kept after filtering to AI tool process trees" />
       <div className="kpis">
         {kpis(data).map((k) => (

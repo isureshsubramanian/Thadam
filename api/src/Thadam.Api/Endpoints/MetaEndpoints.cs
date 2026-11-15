@@ -10,6 +10,38 @@ public static class MetaEndpoints
     {
         ArgumentNullException.ThrowIfNull(api);
         api.MapGet("/meta", MetaAsync).RequireAuthorization();
+        api.MapGet("/coverage", CoverageAsync).RequireAuthorization();
+    }
+
+    private static async Task<IResult> CoverageAsync(
+        [AsParameters] RangeArgs args, StoreFolder store, ToolRegistry registry, TimeProvider time, CancellationToken ct)
+    {
+        var tools = (await registry.ToolsAsync(ct).ConfigureAwait(false)).Select(t => t.Key).ToHashSet(StringComparer.Ordinal);
+        if (await Validation.CheckAsync(new RangeArgsValidator(time, tools), args, ct).ConfigureAwait(false) is { } bad)
+        {
+            return bad;
+        }
+        var range = Args.Range(args.From, args.To, time);
+        var catalog = await store.ReadCatalogAsync(ct).ConfigureAwait(false);
+        var gaps = StoreFolder.Gaps(catalog.Entries)
+            .Concat(StoreFolder.Pauses(catalog.Entries).Select(p => new Gap(p.FromUs, p.ToUs, "paused", null, p.Missed)))
+            .Where(g => g.FromUs < range.ToUs && g.ToUs > range.FromUs)
+            .Select(g => g with { FromUs = Math.Max(g.FromUs, range.FromUs), ToUs = Math.Min(g.ToUs, range.ToUs) })
+            .Where(g => g.ToUs > g.FromUs)
+            .OrderBy(g => g.FromUs).ThenBy(g => g.ToUs).ToList();
+        long total = 0;
+        long end = range.FromUs;
+        foreach (var g in gaps.Where(g => g.Reason is "not_running" or "before_start" or "paused"))
+        {
+            total += Math.Max(0, g.ToUs - Math.Max(end, g.FromUs));
+            end = Math.Max(end, g.ToUs);
+        }
+        return Results.Json(new
+        {
+            range = QueryEndpoints.Range(range),
+            gaps = gaps.Select(g => new { from = Values.Time(g.FromUs), to = Values.Time(g.ToUs), g.Reason, g.Detail, g.Missed }),
+            notWatchedSeconds = total / 1_000_000,
+        });
     }
 
     private static async Task<IResult> MetaAsync(

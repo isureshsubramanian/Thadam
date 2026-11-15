@@ -12,6 +12,10 @@
 //! reader, then the OS logger buffers: nothing is dropped silently. The one exception is a
 //! low disk (ADR-009 Decision 4): the writer then counts records instead of writing them,
 //! and the catalog records the gap with its count.
+//!
+//! The writer thread also keeps the heartbeat and, once a minute, records a `dropped` gap per
+//! source that lost events in that minute (ADR-013 Decision 1). The pipeline thread publishes
+//! its loss counters for it (`Lost`).
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -25,6 +29,7 @@ use thadam_core::{EventRecord, Redactor};
 use thadam_store::{SegmentStatus, SegmentWriter, StoreError, Written};
 use thiserror::Error;
 
+use crate::coverage::{self, Beat, Heartbeat};
 use crate::pipeline::{Pipeline, Stats};
 use crate::source::agent::{AgentItem, AgentListener};
 use crate::source::network::{FlowItem, FlowListener};
@@ -45,8 +50,8 @@ const RECORD_BUFFER: usize = 10_000;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(500);
 /// How often the writer applies the retention limits and checks free space (ADR-009
-/// Decision 3).
-const MAINTAIN_EVERY: Duration = Duration::from_secs(60);
+/// Decision 3), beats the heartbeat and records dropped events (ADR-013 Decision 1).
+const MAINTAIN_EVERY: Duration = coverage::BEAT_EVERY;
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -127,6 +132,7 @@ pub fn run<S>(
     prepare: impl FnOnce(&mut Pipeline),
     on_stop: impl FnOnce(),
     report_every: Duration,
+    heartbeat: Option<Heartbeat>,
 ) -> Result<(Ended, Stats), RunError>
 where
     S: EventSource + Send + 'static,
@@ -152,10 +158,21 @@ where
     // Shared so progress lines show rows written so far, not only the total at the end.
     let written = Arc::new(AtomicU64::new(0));
     let status = Arc::new(Mutex::new(store.status()));
+    let lost = Arc::new(Lost::default());
     let writer = {
         let written = Arc::clone(&written);
         let status = Arc::clone(&status);
-        std::thread::spawn(move || write_all(store, &record_rx, &written, &status))
+        let lost = Arc::clone(&lost);
+        std::thread::spawn(move || {
+            write_all(
+                store,
+                &record_rx,
+                &written,
+                &status,
+                &lost,
+                heartbeat.as_ref(),
+            )
+        })
     };
 
     prepare(pipeline);
@@ -171,6 +188,7 @@ where
             every: report_every,
             written: &written,
             status: &status,
+            lost: &lost,
         },
     );
     drop(record_tx);
@@ -198,18 +216,77 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>) {
     }
 }
 
-/// Writes records and, once a minute, applies the retention limits. A record not written
-/// because the disk is low is counted by the writer and noted in the catalog on resume.
+/// Events the sources reported lost so far, published by the pipeline thread.
+#[derive(Default)]
+struct Lost {
+    os: AtomicU64,
+    net: AtomicU64,
+}
+
+/// What the writer has already recorded of `Lost`, and since when.
+struct Recorded {
+    since_us: i64,
+    os: u64,
+    net: u64,
+}
+
+impl Recorded {
+    /// One `dropped` gap per source that lost events since the last call.
+    fn record(&mut self, store: &mut SegmentWriter, lost: &Lost) -> Result<(), StoreError> {
+        let now = now_us();
+        let os = lost.os.load(Ordering::Relaxed);
+        let net = lost.net.load(Ordering::Relaxed);
+        for gap in [
+            coverage::dropped(self.since_us, now, "os", os.saturating_sub(self.os)),
+            coverage::dropped(self.since_us, now, "network", net.saturating_sub(self.net)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            store.record_gap(now, &gap)?;
+        }
+        *self = Self {
+            since_us: now,
+            os,
+            net,
+        };
+        Ok(())
+    }
+}
+
+/// Writes the heartbeat. A failure is reported, never fatal: the beat is only a hint.
+fn beat(heartbeat: Option<&Heartbeat>, stopped: bool) {
+    if let Some(hb) = heartbeat
+        && let Err(e) = hb.write(Beat {
+            at_us: now_us(),
+            stopped,
+        })
+    {
+        crate::diag!("thadam-collector: cannot write the heartbeat: {e}");
+    }
+}
+
+/// Writes records and, once a minute, applies the retention limits, beats and records
+/// dropped events. A record not written because the disk is low is counted by the writer
+/// and noted in the catalog on resume.
 fn write_all(
     mut store: SegmentWriter,
     rx: &Receiver<EventRecord>,
     written: &AtomicU64,
     status: &Mutex<SegmentStatus>,
+    lost: &Lost,
+    heartbeat: Option<&Heartbeat>,
 ) -> Result<(), StoreError> {
     let publish = |store: &SegmentWriter| {
         if let Ok(mut s) = status.lock() {
             *s = store.status();
         }
+    };
+    beat(heartbeat, false);
+    let mut recorded = Recorded {
+        since_us: now_us(),
+        os: 0,
+        net: 0,
     };
     store.maintain(now_us())?;
     publish(&store);
@@ -242,14 +319,20 @@ fn write_all(
                 crate::diag!("thadam-collector: disk low, writing paused");
             }
             publish(&store);
+            recorded.record(&mut store, lost)?;
+            beat(heartbeat, false);
             last_maintain = Instant::now();
         }
     }
     publish(&store);
-    store.finish(now_us())
+    recorded.record(&mut store, lost)?;
+    store.finish(now_us())?;
+    beat(heartbeat, true);
+    Ok(())
 }
 
-fn now_us() -> i64 {
+/// Wall-clock time in microseconds since the epoch.
+pub fn now_us() -> i64 {
     i64::try_from(time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000)
         .unwrap_or(i64::MAX)
 }
@@ -259,6 +342,14 @@ struct Progress<'a> {
     every: Duration,
     written: &'a AtomicU64,
     status: &'a Mutex<SegmentStatus>,
+    lost: &'a Lost,
+}
+
+impl Progress<'_> {
+    fn publish_lost(&self, stats: &Stats) {
+        self.lost.os.store(stats.missed, Ordering::Relaxed);
+        self.lost.net.store(stats.net_missed, Ordering::Relaxed);
+    }
 }
 
 fn process(
@@ -291,8 +382,14 @@ fn process(
             last_report = Instant::now();
         }
         match items.recv_timeout(POLL) {
-            Ok(Input::Os(Ok(item))) => send(pipeline.handle(item), pipeline, redactor, records)?,
-            Ok(Input::Net(item)) => send(pipeline.handle_flow(item), pipeline, redactor, records)?,
+            Ok(Input::Os(Ok(item))) => {
+                send(pipeline.handle(item), pipeline, redactor, records)?;
+                progress.publish_lost(&pipeline.stats);
+            }
+            Ok(Input::Net(item)) => {
+                send(pipeline.handle_flow(item), pipeline, redactor, records)?;
+                progress.publish_lost(&pipeline.stats);
+            }
             Ok(Input::Agent(item)) => {
                 send(pipeline.handle_agent(item), pipeline, redactor, records)?;
             }
@@ -311,6 +408,7 @@ fn process(
         }
     };
     send(pipeline.finish(), pipeline, redactor, records)?;
+    progress.publish_lost(&pipeline.stats);
     Ok(ended)
 }
 

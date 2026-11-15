@@ -9,8 +9,12 @@ use thadam_core::{CatalogKind, CatalogRow, GENESIS, catalog_hash};
 
 use crate::StoreError;
 
-/// 1: the first catalog schema.
-const CATALOG_VERSION: i64 = 1;
+/// 1: the first catalog schema. 2: the `gap` kind (ADR-013 Decision 1); same columns and
+/// encoding, a wider `kind` check. Version 1 files are migrated on open (`migrate_v1`).
+const CATALOG_VERSION: i64 = 2;
+/// Where the migration keeps the version 1 catalog, for rollback. Not `*.db`, so nothing that
+/// lists the store's databases picks it up.
+pub const CATALOG_V1_BACKUP: &str = "catalog.db.v1-backup";
 
 /// One catalog entry as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +37,11 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
+        let path = path.as_ref();
+        let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        apply(&conn)?;
+        apply(&mut conn, path)?;
         Ok(Self { conn })
     }
 
@@ -48,7 +53,8 @@ impl Catalog {
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != CATALOG_VERSION {
+        // A version 1 file read before its writer migrated it: same columns, fewer kinds.
+        if version != CATALOG_VERSION && version != 1 {
             return Err(StoreError::SchemaVersion(version));
         }
         Ok(Self { conn })
@@ -126,39 +132,41 @@ impl Catalog {
 
     /// Walks the catalog's own chain.
     pub fn verify(&self) -> Result<CatalogReport, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {COLUMNS} FROM catalog ORDER BY seq"))?;
-        let mut rows = stmt.query([])?;
-        let mut prev = GENESIS;
-        let mut expected = 1;
-        let mut verified = 0;
-        while let Some(r) = rows.next()? {
-            let seq: i64 = r.get(0)?;
-            let ok = read(r).is_some_and(|(row, stored_prev, stored_hash)| {
-                seq == expected
-                    && stored_prev == prev
-                    && CatalogKind::from_wire(&row.kind).is_some()
-                    && catalog_hash(&prev, &row).is_ok_and(|h| h == stored_hash)
-                    && {
-                        prev = stored_hash;
-                        true
-                    }
-            });
-            if !ok {
-                return Ok(CatalogReport {
-                    verified,
-                    broken_at: Some(seq),
-                });
-            }
-            verified += 1;
-            expected += 1;
-        }
-        Ok(CatalogReport {
-            verified,
-            broken_at: None,
-        })
+        verify_conn(&self.conn)
     }
+}
+
+fn verify_conn(conn: &Connection) -> Result<CatalogReport, StoreError> {
+    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM catalog ORDER BY seq"))?;
+    let mut rows = stmt.query([])?;
+    let mut prev = GENESIS;
+    let mut expected = 1;
+    let mut verified = 0;
+    while let Some(r) = rows.next()? {
+        let seq: i64 = r.get(0)?;
+        let ok = read(r).is_some_and(|(row, stored_prev, stored_hash)| {
+            seq == expected
+                && stored_prev == prev
+                && CatalogKind::from_wire(&row.kind).is_some()
+                && catalog_hash(&prev, &row).is_ok_and(|h| h == stored_hash)
+                && {
+                    prev = stored_hash;
+                    true
+                }
+        });
+        if !ok {
+            return Ok(CatalogReport {
+                verified,
+                broken_at: Some(seq),
+            });
+        }
+        verified += 1;
+        expected += 1;
+    }
+    Ok(CatalogReport {
+        verified,
+        broken_at: None,
+    })
 }
 
 const COLUMNS: &str = "seq, at_us, kind, segment, first_seq, last_seq, first_prev_hash, last_hash,
@@ -192,22 +200,88 @@ fn read(r: &Row<'_>) -> Option<(CatalogRow, [u8; 32], [u8; 32])> {
     ))
 }
 
-fn apply(conn: &Connection) -> Result<(), StoreError> {
+fn apply(conn: &mut Connection, path: &Path) -> Result<(), StoreError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == CATALOG_VERSION {
-        return Ok(());
+    match version {
+        CATALOG_VERSION => Ok(()),
+        0 => {
+            conn.execute_batch(&format!(
+                "BEGIN; {} PRAGMA user_version = {CATALOG_VERSION}; COMMIT;",
+                schema("catalog")
+            ))?;
+            Ok(())
+        }
+        1 => migrate_v1(conn, path),
+        other => Err(StoreError::SchemaVersion(other)),
     }
-    if version != 0 {
-        return Err(StoreError::SchemaVersion(version));
+}
+
+/// Version 1 to 2 (ADR-013 Decision 1). SQLite cannot widen a CHECK in place, so the table is
+/// rebuilt: a copy of the version 1 file is kept first, then one transaction creates the new
+/// table, copies every entry unchanged, restores the append-only triggers and walks the chain
+/// again.
+/// Any failure rolls back and leaves version 1 in place. One-way: older writers refuse
+/// version 2, so going back means restoring `CATALOG_V1_BACKUP`.
+fn migrate_v1(conn: &mut Connection, path: &Path) -> Result<(), StoreError> {
+    let backup = path.with_file_name(CATALOG_V1_BACKUP);
+    match std::fs::remove_file(&backup) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
     }
+    let backup_text = backup
+        .to_str()
+        .ok_or_else(|| StoreError::Layout("catalog backup path is not UTF-8".to_string()))?;
+    conn.execute("VACUUM INTO ?1", [backup_text])?;
+    let before: i64 = conn.query_row("SELECT count(*) FROM catalog", [], |r| r.get(0))?;
+    // Compared, not required clean: a catalog that already has a break migrates as it is and
+    // `verify` keeps reporting the same break.
+    let before_report = verify_conn(conn)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+    tx.execute_batch(&format!(
+        "{}
+        INSERT INTO catalog_v2 SELECT {COLUMNS} FROM catalog;
+        DROP TRIGGER catalog_no_update;
+        DROP TRIGGER catalog_no_delete;
+        DROP TABLE catalog;
+        ALTER TABLE catalog_v2 RENAME TO catalog;
+        {}
+        PRAGMA user_version = {CATALOG_VERSION};",
+        table("catalog_v2"),
+        triggers("catalog")
+    ))?;
+    let after: i64 = tx.query_row("SELECT count(*) FROM catalog", [], |r| r.get(0))?;
+    let report = verify_conn(&tx)?;
+    if after != before || report != before_report {
+        // Dropping the transaction rolls it back.
+        return Err(StoreError::Layout(
+            "catalog migration did not reproduce the chain; left at version 1".to_string(),
+        ));
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn schema(name: &str) -> String {
+    format!("{} {}", table(name), triggers(name))
+}
+
+fn triggers(name: &str) -> String {
+    format!(
+        "CREATE TRIGGER {name}_no_update BEFORE UPDATE ON {name}
+            BEGIN SELECT RAISE(ABORT, 'catalog is append-only'); END;
+        CREATE TRIGGER {name}_no_delete BEFORE DELETE ON {name}
+            BEGIN SELECT RAISE(ABORT, 'catalog is append-only'); END;"
+    )
+}
+
+fn table(name: &str) -> String {
     let kinds = CatalogKind::ALL
         .iter()
         .map(|k| format!("'{}'", k.wire_name()))
         .collect::<Vec<_>>()
         .join(", ");
-    conn.execute_batch(&format!(
-        "BEGIN;
-        CREATE TABLE catalog (
+    format!(
+        "CREATE TABLE {name} (
             seq             INTEGER PRIMARY KEY,
             at_us           INTEGER NOT NULL,
             kind            TEXT    NOT NULL CHECK (kind IN ({kinds})),
@@ -226,13 +300,6 @@ fn apply(conn: &Connection) -> Result<(), StoreError> {
             missed          INTEGER,
             prev_hash       BLOB    NOT NULL CHECK (length(prev_hash) = 32),
             hash            BLOB    NOT NULL CHECK (length(hash) = 32)
-        ) STRICT;
-        CREATE TRIGGER catalog_no_update BEFORE UPDATE ON catalog
-            BEGIN SELECT RAISE(ABORT, 'catalog is append-only'); END;
-        CREATE TRIGGER catalog_no_delete BEFORE DELETE ON catalog
-            BEGIN SELECT RAISE(ABORT, 'catalog is append-only'); END;
-        PRAGMA user_version = {CATALOG_VERSION};
-        COMMIT;"
-    ))?;
-    Ok(())
+        ) STRICT;"
+    )
 }

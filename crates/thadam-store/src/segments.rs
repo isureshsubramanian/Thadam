@@ -299,6 +299,23 @@ impl SegmentWriter {
         self.catalog.leave_wal()
     }
 
+    /// Records a window the collector did not watch (ADR-013 Decision 1). Thadam's own state:
+    /// no segment, nothing about what any tool did.
+    pub fn record_gap(&mut self, now_us: i64, gap: &Gap) -> Result<(), StoreError> {
+        self.catalog.append(
+            CatalogKind::Gap,
+            CatalogRow {
+                at_us: now_us,
+                reason: Some(gap.reason.wire_name().to_string()),
+                detail: gap.detail.map(str::to_string),
+                from_us: Some(gap.from_us),
+                to_us: Some(gap.to_us),
+                missed: gap.missed.map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
+                ..CatalogRow::default()
+            },
+        )
+    }
+
     fn resume(&mut self, now_us: i64) -> Result<(), StoreError> {
         if let Some(p) = self.pause.take() {
             self.catalog.append(
@@ -501,6 +518,42 @@ pub struct RetiredRange {
     pub reason: String,
 }
 
+/// Why the collector did not watch a window (ADR-013 Decision 1). The wire names are the
+/// catalog's `reason` values, read by the API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapReason {
+    /// The collector was not running; detail `stopped` (clean stop) or `crashed`.
+    NotRunning,
+    /// The Mac was off or asleep through a restart: from the last heartbeat to boot.
+    MachineOff,
+    /// From boot to the collector's start.
+    BeforeStart,
+    /// The OS logger or the network extension lost events; detail `os` or `network`.
+    Dropped,
+}
+
+impl GapReason {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            GapReason::NotRunning => "not_running",
+            GapReason::MachineOff => "machine_off",
+            GapReason::BeforeStart => "before_start",
+            GapReason::Dropped => "dropped",
+        }
+    }
+}
+
+/// One window the collector did not watch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gap {
+    pub from_us: i64,
+    pub to_us: i64,
+    pub reason: GapReason,
+    pub detail: Option<&'static str>,
+    /// Events lost, for `Dropped` only.
+    pub missed: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DirReport {
     pub catalog_entries: u64,
@@ -509,6 +562,8 @@ pub struct DirReport {
     pub retired: Vec<RetiredRange>,
     /// (from_us, to_us, missed) for each pause.
     pub pauses: Vec<(i64, i64, i64)>,
+    /// Gap entries (ADR-013 Decision 1), as their catalog rows.
+    pub gaps: Vec<CatalogRow>,
     /// `.db` files in the folder that the catalog doesn't know.
     pub unknown_files: Vec<String>,
     /// Not breaks: e.g. a retired segment still on disk (a crash before the delete).
@@ -536,6 +591,9 @@ pub fn verify_dir(dir: impl AsRef<Path>) -> Result<DirReport, StoreError> {
                 e.row.to_us.unwrap_or(0),
                 e.row.missed.unwrap_or(0),
             ));
+        }
+        if e.kind == CatalogKind::Gap {
+            report.gaps.push(e.row.clone());
         }
     }
     let segments = segments_from(&entries)?;

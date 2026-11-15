@@ -28,6 +28,10 @@ public sealed record Segment(
     public bool IsKept => State is SegmentState.Active or SegmentState.Closed;
 }
 
+/// <summary>A window the collector did not watch (ADR-013 Decision 1): reason <c>not_running</c>,
+/// <c>machine_off</c>, <c>before_start</c> or <c>dropped</c>, kept as written when unknown.</summary>
+public sealed record Gap(long FromUs, long ToUs, string Reason, string? Detail, long? Missed);
+
 /// <summary>A time when writing was paused for lack of disk space (ADR-009 Decision 4).</summary>
 public sealed record Pause(long FromUs, long ToUs, long Missed);
 
@@ -44,7 +48,7 @@ public sealed class StoreFolder
     public const string CatalogFile = "catalog.db";
     /// <summary>Segments written before ADR-011 are version 2; newer ones are version 3. Both are read.</summary>
     private static readonly long[] EventSchemaVersions = [2, 3];
-    private static readonly long[] CatalogSchemaVersions = [1];
+    private static readonly long[] CatalogSchemaVersions = [1, 2];
 
     public StoreFolder(string path)
     {
@@ -153,6 +157,10 @@ public sealed class StoreFolder
 
     public static IReadOnlyList<Pause> Pauses(IEnumerable<CatalogEntry> entries) =>
         [.. entries.Where(e => e.Kind == "paused").Select(e => new Pause(e.FromUs ?? 0, e.ToUs ?? 0, e.Missed ?? 0))];
+
+    public static IReadOnlyList<Gap> Gaps(IEnumerable<CatalogEntry> entries) =>
+        [.. entries.Where(e => e.Kind == "gap").Select(e => new Gap(
+            e.FromUs ?? 0, e.ToUs ?? 0, e.Reason ?? "", e.Detail, e.Missed))];
 
     private static async Task<SqliteConnection> OpenReadOnlyAsync(string file, long[] versions, CancellationToken ct)
     {

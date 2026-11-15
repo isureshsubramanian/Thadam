@@ -17,11 +17,11 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params_f
 use thadam_core::{CanonicalRow, CoreError, Encoding, EventRecord, GENESIS, row_hash, to_hex};
 use thiserror::Error;
 
-pub use catalog::{Catalog, CatalogEntry, CatalogReport};
+pub use catalog::{CATALOG_V1_BACKUP, Catalog, CatalogEntry, CatalogReport};
 pub use disk::{DiskSpace, SystemDisk};
 pub use segments::{
-    CATALOG_FILE, DirBreak, DirReport, Limits, MigrateReport, RetiredRange, SegmentStatus,
-    SegmentWriter, Written, migrate, verify_dir,
+    CATALOG_FILE, DirBreak, DirReport, Gap, GapReason, Limits, MigrateReport, RetiredRange,
+    SegmentStatus, SegmentWriter, Written, migrate, verify_dir,
 };
 
 #[derive(Debug, Error)]

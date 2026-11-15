@@ -10,6 +10,11 @@ export type Severity = z.infer<typeof severity>;
 
 export const range = z.object({ from: time, to: time });
 
+export const gap = z.object({ from: time, to: time, reason: z.string(), detail: z.string().nullable(), missed: count.nullable() });
+export type Gap = z.infer<typeof gap>;
+export const coverage = z.object({ range, gaps: z.array(gap), notWatchedSeconds: count });
+export type Coverage = z.infer<typeof coverage>;
+
 export const chain = z.discriminatedUnion("state", [
   z.object({ state: z.literal("pending") }),
   z.object({ state: z.literal("unreadable") }),
@@ -105,6 +110,7 @@ export const session = z.object({
   last: time,
   rows: count,
   events: count,
+  prompts: count,
 });
 export type Session = z.infer<typeof session>;
 

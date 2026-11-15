@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api } from "../api/client";
 import type { Session } from "../api/schemas";
+import { OsOnly, TimelineCoverage } from "../app/coverage";
 import { EventTable } from "../app/events";
 import { ExportButton } from "../app/ExportButton";
 import { num, when } from "../app/format";
@@ -10,6 +11,7 @@ import type { TimeRange } from "../app/range";
 import { href } from "../app/route";
 import { Empty, Loading, PageHead } from "../app/ui";
 import { usePaged } from "../app/usePaged";
+
 
 const projectName = (p: string | null): string => (p === null ? "no project" : (p.split("/").filter(Boolean).at(-1) ?? p));
 
@@ -28,7 +30,7 @@ function SessionList({ range }: { range: TimeRange }) {
               {page.items?.map((s) => (
                 <tr key={s.sessionId}>
                   <td><a className="mono" href={href({ view: "sessions", sessionId: s.sessionId })}>{s.sessionId}</a>{s.parentSessionId !== null && <span className="muted"> · delegated</span>}</td>
-                  <td>{s.displayName}</td>
+                  <td>{s.displayName} {s.prompts === 0 && <OsOnly />}</td>
                   <td>{projectName(s.project)}</td>
                   <td>{when(s.last)}</td>
                   <td className="num">{num(s.rows)}</td>
@@ -76,6 +78,8 @@ function Timeline({ sessionId }: { sessionId: string }) {
           sub={`${when(s.first)} to ${when(s.last)} · ${num(s.events)} events stored as ${num(s.rows)} rows`}
         />
       )}
+      {s?.prompts === 0 && <OsOnly />}
+      {s && <TimelineCoverage range={{ from: s.first, to: s.last }} />}
       {s?.parentSessionId != null && (
         <p className="sub">Delegated from <a className="mono" href={href({ view: "sessions", sessionId: s.parentSessionId })}>{s.parentSessionId}</a></p>
       )}

@@ -97,7 +97,7 @@ export const search = {
 
 /** A session timeline with what the OS saw and what the tool's hook reported (ADR-011). */
 export const timeline = {
-  session: { sessionId: "s-b1", tool: "cli_agent", displayName: "CLI agent", parentSessionId: null, project: "/Users/dev/projects/sample-app", first: "2026-11-11T09:00:00.000000Z", last: "2026-11-11T09:02:00.000000Z", rows: 3, events: 3 },
+  session: { sessionId: "s-b1", tool: "cli_agent", displayName: "CLI agent", parentSessionId: null, project: "/Users/dev/projects/sample-app", first: "2026-11-11T09:00:00.000000Z", last: "2026-11-11T09:02:00.000000Z", rows: 3, events: 3, prompts: 1 },
   children: [],
   events: [
     { ...event, seq: 38, category: "prompt", action: "prompt", target: "fix the failing test", source: "agent", agentSessionId: "a-51c2", transcript: "/Users/dev/.cli-agent/a-51c2.jsonl" },

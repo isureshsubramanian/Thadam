@@ -111,6 +111,7 @@ export const api = {
   signIn: (password: string) => write("POST", "/session", { password }),
   signOut: () => write("DELETE", "/session"),
   meta: (signal?: AbortSignal) => get(s.meta, "/meta", signal),
+  coverage: (a: RangeArgs, signal?: AbortSignal) => get(s.coverage, `/coverage${query({ ...a })}`, signal),
   overview: (a: RangeArgs, signal?: AbortSignal) => get(s.overview, `/overview${query({ ...a })}`, signal),
   flags: (a: RangeArgs & { status: "open" | "reviewed"; severity?: s.Severity | undefined; after?: number | null }, signal?: AbortSignal) =>
     get(s.flags, `/flags${query({ ...a })}`, signal),

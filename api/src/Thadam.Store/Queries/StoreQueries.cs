@@ -358,14 +358,14 @@ public sealed class StoreQueries(SegmentIndex index)
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
             await foreach (var r in QueryAsync(conn, filter, $"""
-                SELECT session_id, tool, max(parent_session_id), max(project), min(ts_us), max(ts_us), count(*), sum(count), max(seq)
+                SELECT session_id, tool, max(parent_session_id), max(project), min(ts_us), max(ts_us), count(*), sum(count), max(seq), sum(source = 'agent' AND category = 'prompt')
                 FROM events WHERE {(filter is null ? "1" : "{filter}")} AND session_id IS NOT NULL{idClause}
                 GROUP BY session_id, tool
                 """, ids, ct).ConfigureAwait(false))
             {
                 var s = new SessionSummary(
                     r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3),
-                    r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8));
+                    r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8), r.GetInt64(9));
                 merged[s.SessionId] = merged.TryGetValue(s.SessionId, out var m)
                     ? m with
                     {
@@ -375,6 +375,7 @@ public sealed class StoreQueries(SegmentIndex index)
                         LastTsUs = Math.Max(m.LastTsUs, s.LastTsUs),
                         Rows = m.Rows + s.Rows,
                         Events = m.Events + s.Events,
+                        Prompts = m.Prompts + s.Prompts,
                         LastSeq = Math.Max(m.LastSeq, s.LastSeq),
                     }
                     : s;

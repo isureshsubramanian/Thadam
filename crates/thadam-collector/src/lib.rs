@@ -4,6 +4,7 @@
 pub mod agent_rows;
 pub mod classify;
 pub mod collapse;
+pub mod coverage;
 pub mod diag;
 pub mod netflow;
 pub mod pairing;

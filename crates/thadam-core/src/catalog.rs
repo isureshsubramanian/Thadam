@@ -28,6 +28,10 @@ pub enum CatalogKind {
     Archived,
     /// Writing was paused for lack of disk space; `missed` rows were not written.
     Paused,
+    /// A window the collector did not watch (ADR-013 Decision 1): `from_us..to_us`, `reason`
+    /// (`not_running`, `machine_off`, `before_start`, `dropped`), `detail`, and `missed` for
+    /// `dropped`. No segment.
+    Gap,
 }
 
 impl CatalogKind {
@@ -37,6 +41,7 @@ impl CatalogKind {
         CatalogKind::Retired,
         CatalogKind::Archived,
         CatalogKind::Paused,
+        CatalogKind::Gap,
     ];
 
     pub const fn wire_name(self) -> &'static str {
@@ -46,6 +51,7 @@ impl CatalogKind {
             CatalogKind::Retired => "retired",
             CatalogKind::Archived => "archived",
             CatalogKind::Paused => "paused",
+            CatalogKind::Gap => "gap",
         }
     }
 

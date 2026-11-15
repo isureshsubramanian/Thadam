@@ -16,6 +16,7 @@ afterEach(() => {
 });
 
 const base: fake.Routes = {
+  "GET /coverage": { status: 200, body: { range: fake.overview.range, gaps: [], notWatchedSeconds: 0 } },
   "GET /meta": { status: 200, body: fake.meta },
   "GET /overview": { status: 200, body: fake.overview },
   "GET /antiforgery": { status: 200, body: { token: "t-123" } },
@@ -155,5 +156,54 @@ describe("dashboard", () => {
     render(<App />);
     const alert = await screen.findByText("Check the tool: value.");
     expect(alert.textContent).not.toContain("secret_name");
+  });
+});
+
+describe("coverage and session labels", () => {
+  const gap = (reason: string, detail: string | null = null, missed: number | null = null) => ({
+    from: fake.timeline.session.first, to: fake.timeline.session.last, reason, detail, missed,
+  });
+  const coverageRoute = (gaps: ReturnType<typeof gap>[], notWatchedSeconds = 840): fake.Routes => ({
+    ...base, "GET /coverage": { status: 200, body: { range: fake.overview.range, gaps, notWatchedSeconds } },
+  });
+  it.each([{ gaps: [] }, { gaps: [gap("machine_off")] }])("shows Watching for empty or Mac-off-only coverage", async ({ gaps }) => {
+    fake.install(coverageRoute(gaps));
+    render(<App />);
+    expect((await screen.findByText("Watching")).className).toBe("pill ok");
+  });
+  it("shows union minutes, reason counts, and coverage wording", async () => {
+    fake.install(coverageRoute([gap("not_running", "stopped"), gap("not_running", "crashed"), gap("machine_off"), gap("before_start"), gap("dropped", "os", 2), gap("dropped", "network", 3), gap("paused", null, 9)]));
+    render(<App />);
+    const pill = await screen.findByText("Not watching: 14 min");
+    expect(pill.className).toBe("pill flag");
+    expect(pill.title).toContain("not running: 2");
+    for (const label of ["Thadam not running (stopped)", "Thadam not running (crashed)", "Mac off", "Starting after boot", "2 events dropped by macOS", "3 events dropped by the network extension", "Writing paused: disk low (9 events not written)"]) {
+      expect(await screen.findByText((text) => text.includes(label))).toBeTruthy();
+    }
+  });
+  it("reports dropped events without counting minutes", async () => {
+    fake.install(coverageRoute([gap("dropped", "os", 7), gap("machine_off")], 0));
+    render(<App />);
+    expect((await screen.findByText("Events dropped: 7")).className).toBe("pill flag");
+  });
+  it("shows the empty coverage card", async () => {
+    fake.install(base);
+    render(<App />);
+    expect(await screen.findByText("No gaps in this range.")).toBeTruthy();
+  });
+  it("shows OS-only labels and limits missing-activity lines", async () => {
+    const session = { ...fake.timeline.session, prompts: 0 };
+    fake.install({
+      ...coverageRoute([...Array.from({ length: 7 }, () => gap("not_running", "crashed")), gap("machine_off")]),
+      "GET /sessions": { status: 200, body: { range: fake.overview.range, items: [session], next: null } },
+      "GET /sessions/s-b1": { status: 200, body: { ...fake.timeline, session } },
+    });
+    window.location.hash = "#/sessions";
+    render(<App />);
+    expect((await screen.findByText("OS only: no prompts recorded")).title).toBe("The tool's hooks sent no prompts for this session: it started before the hooks were installed, the tool has no hooks, or no prompt was typed.");
+    act(() => { window.location.hash = "#/sessions/s-b1"; window.dispatchEvent(new HashChangeEvent("hashchange")); });
+    expect(await screen.findByText("and 2 more")).toBeTruthy();
+    expect(screen.getAllByText(/activity in that window is missing/)).toHaveLength(5);
+    expect(screen.getByText("OS only: no prompts recorded")).toBeTruthy();
   });
 });

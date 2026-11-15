@@ -407,6 +407,91 @@ fn unrelated_processes_produce_nothing() {
     assert!(rows(&db).is_empty());
 }
 
+/// (reason, detail, missed) of every gap entry in the store's catalog (ADR-013 Decision 1).
+fn gaps(dir: &TempDir) -> Vec<(String, Option<String>, Option<i64>)> {
+    let report = verify_dir(dir.path("store")).unwrap();
+    assert_eq!(report.broken, None);
+    report
+        .gaps
+        .into_iter()
+        .map(|g| (g.reason.unwrap(), g.detail, g.missed))
+        .collect()
+}
+
+#[test]
+fn a_restart_is_recorded_as_a_gap_and_a_logger_jump_as_dropped_events() {
+    let dir = TempDir::new("gaps");
+    let (out, _) = run_stdin(&dir, &sample_stream(), &[]);
+    assert!(out.status.success());
+    // A first start has no heartbeat to go on, so it claims no gap; the sample's own logger
+    // jump (10 events) is one dropped entry. A clean end says stopped.
+    let dropped = |n| ("dropped".to_string(), Some("os".to_string()), Some(n));
+    assert_eq!(gaps(&dir), [dropped(10)]);
+    let beat = std::fs::read_to_string(dir.path("store").join("collector.heartbeat")).unwrap();
+    assert!(beat.starts_with("stopped "), "{beat}");
+
+    // The logger's sequence jumps from 10 to 14: three events lost.
+    let unrelated = process(
+        9999,
+        1,
+        "/Applications/Other.app/Contents/MacOS/Other",
+        false,
+    );
+    let input: String = [10, 14, 15]
+        .iter()
+        .map(|&i| {
+            line(
+                i,
+                1,
+                &unrelated,
+                "open",
+                &format!(r#"{{"fflag":1,"file":{}}}"#, file("/Users/test/x")),
+            ) + "\n"
+        })
+        .collect();
+    let (out, _) = run_stdin(&dir, &input, &[]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(" missed=3"));
+    assert_eq!(
+        gaps(&dir),
+        [
+            dropped(10),
+            ("not_running".to_string(), Some("stopped".to_string()), None),
+            dropped(3),
+        ]
+    );
+}
+
+#[test]
+fn a_killed_collector_is_recorded_as_crashed() {
+    let dir = TempDir::new("crash");
+    let store = dir.path("store");
+    let mut child = Command::new(BIN)
+        .args(["run", "--source", "stdin", "--registry"])
+        .arg(dir.path("registry.json"))
+        .arg("--store")
+        .arg(&store)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let beat = store.join("collector.heartbeat");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(&beat).is_ok_and(|b| b.starts_with("running ")) {
+        assert!(std::time::Instant::now() < deadline, "no heartbeat");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.kill().unwrap(); // SIGKILL: no clean stop
+    child.wait().unwrap();
+    let (out, _) = run_stdin(&dir, "", &[]);
+    assert!(out.status.success());
+    assert_eq!(
+        gaps(&dir),
+        [("not_running".to_string(), Some("crashed".to_string()), None)]
+    );
+}
+
 #[test]
 fn usage_and_registry_errors_exit_2_without_values() {
     let dir = TempDir::new("usage");

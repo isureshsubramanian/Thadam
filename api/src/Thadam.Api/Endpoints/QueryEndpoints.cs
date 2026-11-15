@@ -247,6 +247,7 @@ public static class QueryEndpoints
         project = s.Project,
         first = Values.Time(s.FirstTsUs),
         last = Values.Time(s.LastTsUs),
+        prompts = s.Prompts,
         rows = s.Rows,
         events = s.Events,
     };

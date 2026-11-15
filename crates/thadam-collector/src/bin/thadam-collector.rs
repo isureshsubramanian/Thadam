@@ -15,10 +15,11 @@ use std::time::Duration;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+use thadam_collector::coverage::{self, Heartbeat};
 use thadam_collector::diag;
 use thadam_collector::pipeline::{Pipeline, Settings};
 use thadam_collector::registry::Registry;
-use thadam_collector::run::{Ended, run, spawn_logger};
+use thadam_collector::run::{Ended, now_us, run, spawn_logger};
 use thadam_collector::service;
 use thadam_collector::snapshot::{self, SystemProcessTable};
 use thadam_collector::source::agent::AgentListener;
@@ -171,12 +172,21 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
         settings.window = time::Duration::seconds(secs);
     }
     // The store is a folder of weekly segments with a catalog (ADR-009 Decision 1).
-    let store = SegmentWriter::open(
+    let mut store = SegmentWriter::open(
         store_path,
         registry.retention().clone(),
         Box::new(SystemDisk),
     )
     .map_err(|e| Failure::Usage(e.to_string()))?;
+    // After the writer lock, so only the collector that owns the store reads and beats it
+    // (ADR-013 Decision 1).
+    let heartbeat = Heartbeat::in_store(Path::new(store_path));
+    let started_us = now_us();
+    for gap in coverage::start_gaps(heartbeat.read(), coverage::boot_time_us(), started_us) {
+        store
+            .record_gap(started_us, &gap)
+            .map_err(|e| Failure::Runtime(e.to_string()))?;
+    }
     // After the writer lock: a refused second collector never touches the log (diag.rs).
     if let Some(log) = o.log.as_deref() {
         diag::to_file(Path::new(log))
@@ -226,6 +236,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
                     }
                 },
                 REPORT_EVERY,
+                Some(heartbeat),
             );
             if let Ok(mut c) = child.lock() {
                 let _ = c.kill();
@@ -243,6 +254,7 @@ fn cmd_run(args: &[String]) -> Result<(), Failure> {
             |_| {},
             || {},
             REPORT_EVERY,
+            Some(heartbeat),
         ),
         _ => return Err(Failure::Usage(USAGE.to_string())),
     }

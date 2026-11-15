@@ -77,6 +77,25 @@ public sealed class MixedVersionTests
         Assert.Equal(rows.Select(r => r.Hash), timeline.Select(r => r.Hash));
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task SessionPromptsCountRowsFromEitherVersion(int version)
+    {
+        using var store = await SyntheticStore.CreateAsync(Ct);
+        var name = $"events-2026-W{44 + version}.db";
+        await using (var conn = new SqliteConnection($"Data Source={Path.Combine(store.Folder.Path, name)};Pooling=False"))
+        {
+            await conn.OpenAsync(Ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE events SET category = 'prompt', count = 10";
+            await cmd.ExecuteNonQueryAsync(Ct);
+        }
+        var queries = new StoreQueries(new SegmentIndex(store.Folder));
+        Assert.Equal(1, Assert.Single(await queries.SessionsAsync(new Filter(new TimeRange(0, 10), null), Ct)).Prompts);
+        Assert.Equal(1, Assert.Single(await queries.SessionTreeAsync("session-1", Ct)).Prompts);
+    }
+
     private sealed class EmptyIndex : ITextIndex
     {
         public long IndexedSeq => 0;

@@ -58,7 +58,8 @@ public sealed record SessionSummary(
     long LastTsUs,
     long Rows,
     long Events,
-    long LastSeq);
+    long LastSeq,
+    long Prompts);
 
 public sealed record ToolStats(
     string Tool, int Sessions, long FilesRead, long FilesWritten, long Commands, long Denied, long Outside, int Hosts, int FlaggedOpen);
