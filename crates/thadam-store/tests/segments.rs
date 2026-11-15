@@ -768,3 +768,105 @@ fn a_v2_file_refuses_rows_it_cannot_hold() {
     );
     assert!(err.is_err());
 }
+
+/// The rows of every segment, as stored: seq, prev_hash, hash and target.
+fn stored(dir: &Path) -> Vec<(i64, Vec<u8>, Vec<u8>, String)> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("events-") && n.ends_with(".db"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .flat_map(|f| {
+            let c = Connection::open(f).unwrap();
+            let mut q = c
+                .prepare("SELECT seq, prev_hash, hash, target FROM events ORDER BY seq")
+                .unwrap();
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn grouped_writes_store_the_same_rows_and_hashes_across_a_rollover() {
+    let one = TempDir::new("group-one");
+    let many = TempDir::new("group-many");
+    let monday = datetime!(2026-11-09 09:00 UTC);
+    let next_monday = datetime!(2026-11-16 09:00 UTC);
+    // Two weeks, and one late row of the first week after the rollover (it stays in the
+    // active segment, ADR-009 Risks).
+    let records: Vec<EventRecord> = (0..30)
+        .map(|i| {
+            record(
+                if (10..25).contains(&i) && i != 20 {
+                    next_monday
+                } else {
+                    monday
+                },
+                i,
+            )
+        })
+        .collect();
+    let now = us(next_monday);
+    let mut w = SegmentWriter::open(one.store(), Limits::default(), plenty()).unwrap();
+    for r in &records {
+        assert_eq!(w.append(r, now).unwrap(), Written::Row);
+    }
+    drop(w);
+    let mut w = SegmentWriter::open(many.store(), Limits::default(), plenty()).unwrap();
+    assert_eq!(w.append_many(&records[..7], now).unwrap(), 7);
+    assert_eq!(w.append_many(&records[7..], now).unwrap(), 23);
+    assert_eq!(w.append_many(&[], now).unwrap(), 0);
+    drop(w);
+    let (a, b) = (stored(&one.store()), stored(&many.store()));
+    assert_eq!(a.len(), 30);
+    assert_eq!(a, b);
+    let report = verify_dir(many.store()).unwrap();
+    assert_eq!(report.broken, None);
+    assert_eq!((report.verified_rows, report.segments_checked), (30, 2));
+}
+
+#[test]
+fn a_group_while_paused_is_counted_missed() {
+    let tmp = TempDir::new("group-paused");
+    let disk = FakeDisk::new(500 * GB);
+    let mut w =
+        SegmentWriter::open(tmp.store(), Limits::default(), Box::new(disk.clone())).unwrap();
+    let t = datetime!(2026-11-11 09:00 UTC);
+    let records: Vec<EventRecord> = (0..5).map(|i| record(t, i)).collect();
+    assert_eq!(w.append_many(&records[..2], us(t)).unwrap(), 2);
+    disk.set(0);
+    w.maintain(us(t)).unwrap();
+    assert_eq!(w.append_many(&records[2..], us(t)).unwrap(), 0);
+    assert_eq!(w.status().missed, 3);
+}
+
+/// ADR-015 Decision 4: rows per second through the writer, one transaction per row and in
+/// groups of 500. Run alone (`cargo test --release -p thadam-store --test segments --
+/// --ignored --nocapture write_throughput`): figures from a run beside other tests are low.
+#[test]
+#[ignore]
+fn write_throughput() {
+    const ROWS: usize = 20_000;
+    let t = datetime!(2026-11-11 09:00 UTC);
+    let records: Vec<EventRecord> = (0..ROWS).map(|i| record(t, i)).collect();
+    for group in [1usize, 500] {
+        let tmp = TempDir::new(&format!("throughput-{group}"));
+        let mut w = SegmentWriter::open(tmp.store(), Limits::default(), plenty()).unwrap();
+        let started = std::time::Instant::now();
+        for chunk in records.chunks(group) {
+            assert_eq!(w.append_many(chunk, us(t)).unwrap(), chunk.len());
+        }
+        let secs = started.elapsed().as_secs_f64();
+        println!("groups of {group}: {:.0} rows/s", ROWS as f64 / secs);
+    }
+}

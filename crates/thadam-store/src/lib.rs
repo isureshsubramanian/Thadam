@@ -242,6 +242,17 @@ impl Store {
 
     /// Appends one event at the end of the chain, atomically.
     pub fn append(&mut self, record: &EventRecord) -> Result<Appended, StoreError> {
+        self.append_many(std::slice::from_ref(record))?
+            .ok_or_else(|| StoreError::Layout("nothing appended".to_string()))
+    }
+
+    /// Appends events at the end of the chain in order, all or none, in one transaction
+    /// (ADR-015 Decision 4): the tail is read once and the INSERT prepared once. The same
+    /// rows and hashes as one `append` each. Returns the last row appended, if any.
+    pub fn append_many(&mut self, records: &[EventRecord]) -> Result<Option<Appended>, StoreError> {
+        if records.is_empty() {
+            return Ok(None);
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -252,55 +263,67 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let (seq, prev_hash) = match tail {
+        let (mut seq, mut prev_hash) = match tail {
             None => (self.start.seq, self.start.prev_hash),
             Some((last, hash)) => (
                 last + 1,
                 to_array(&hash).ok_or(StoreError::BadHashLength(last))?,
             ),
         };
-        let row = record.to_row(seq);
-        // Fails for a v2 file and a row with agent fields: they would not be in the hash.
-        let hash = row_hash(&prev_hash, &row, self.encoding)?;
-        let mut values: Vec<Value> = vec![
-            row.seq.into(),
-            row.event_id.into(),
-            row.ts_us.into(),
-            row.tool.into(),
-            row.session_id.into(),
-            row.parent_session_id.into(),
-            row.pid.into(),
-            row.process_path.into(),
-            row.category.into(),
-            row.action.into(),
-            row.target.into(),
-            row.outcome.into(),
-            row.size_bytes.into(),
-            row.bytes_out.into(),
-            row.bytes_in.into(),
-            row.project.into(),
-            row.flags.into(),
-            row.count.into(),
-            row.detections.into(),
-            row.source.into(),
-            prev_hash.to_vec().into(),
-            hash.to_vec().into(),
-        ];
-        if self.encoding >= Encoding::V3 {
-            values.push(row.agent_session_id.into());
-            values.push(row.transcript.into());
-        }
         let columns = columns(self.encoding);
-        let marks = (1..=values.len())
+        let width = if self.encoding >= Encoding::V3 {
+            24
+        } else {
+            22
+        };
+        let marks = (1..=width)
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
             .join(", ");
-        tx.execute(
-            &format!("INSERT INTO events ({columns}) VALUES ({marks})"),
-            params_from_iter(values),
-        )?;
+        let mut last = None;
+        {
+            let mut insert =
+                tx.prepare_cached(&format!("INSERT INTO events ({columns}) VALUES ({marks})"))?;
+            for record in records {
+                let row = record.to_row(seq);
+                // Fails for a v2 file and a row with agent fields: they would not be in the hash.
+                let hash = row_hash(&prev_hash, &row, self.encoding)?;
+                let mut values: Vec<Value> = vec![
+                    row.seq.into(),
+                    row.event_id.into(),
+                    row.ts_us.into(),
+                    row.tool.into(),
+                    row.session_id.into(),
+                    row.parent_session_id.into(),
+                    row.pid.into(),
+                    row.process_path.into(),
+                    row.category.into(),
+                    row.action.into(),
+                    row.target.into(),
+                    row.outcome.into(),
+                    row.size_bytes.into(),
+                    row.bytes_out.into(),
+                    row.bytes_in.into(),
+                    row.project.into(),
+                    row.flags.into(),
+                    row.count.into(),
+                    row.detections.into(),
+                    row.source.into(),
+                    prev_hash.to_vec().into(),
+                    hash.to_vec().into(),
+                ];
+                if self.encoding >= Encoding::V3 {
+                    values.push(row.agent_session_id.into());
+                    values.push(row.transcript.into());
+                }
+                insert.execute(params_from_iter(values))?;
+                last = Some(Appended { seq, hash });
+                seq += 1;
+                prev_hash = hash;
+            }
+        }
         tx.commit()?;
-        Ok(Appended { seq, hash })
+        Ok(last)
     }
 
     /// Walks this file's chain from its start and reports the first break, if any.

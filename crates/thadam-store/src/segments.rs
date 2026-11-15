@@ -221,34 +221,64 @@ impl SegmentWriter {
 
     /// Writes one record to the active segment, opening or rolling over as its week needs.
     pub fn append(&mut self, record: &EventRecord, now_us: i64) -> Result<Written, StoreError> {
-        let week = iso_week(record.ts_us());
-        let roll = match &self.active {
-            None => true,
-            // A row older than the active week stays in the active segment (ADR-009 Risks).
-            // A segment from before an encoding upgrade is closed and a new one opened in
-            // the same week (`events-YYYY-Www-2.db`): old files are never altered (ADR-011).
-            Some(a) => week > a.week || a.store.encoding() < Encoding::CURRENT,
-        };
-        if roll {
-            self.close_active(now_us)?;
-            self.open_active(week, now_us)?;
-            self.maintain(now_us)?;
+        Ok(
+            if self.append_many(std::slice::from_ref(record), now_us)? == 1 {
+                Written::Row
+            } else {
+                Written::Dropped
+            },
+        )
+    }
+
+    /// Writes records in order, rolling over as their weeks need: each run within one segment
+    /// in one transaction (ADR-015 Decision 4). Returns how many were written; the rest were
+    /// counted as missed because writing is paused.
+    pub fn append_many(
+        &mut self,
+        records: &[EventRecord],
+        now_us: i64,
+    ) -> Result<usize, StoreError> {
+        let mut written = 0;
+        let mut i = 0;
+        while let Some(first) = records.get(i) {
+            let week = iso_week(first.ts_us());
+            let roll = match &self.active {
+                None => true,
+                // A row older than the active week stays in the active segment (ADR-009 Risks).
+                // A segment from before an encoding upgrade is closed and a new one opened in
+                // the same week (`events-YYYY-Www-2.db`): old files are never altered (ADR-011).
+                Some(a) => week > a.week || a.store.encoding() < Encoding::CURRENT,
+            };
+            if roll {
+                self.close_active(now_us)?;
+                self.open_active(week, now_us)?;
+                self.maintain(now_us)?;
+            }
+            let active = self
+                .active
+                .as_mut()
+                .ok_or_else(|| StoreError::Layout("no active segment".to_string()))?;
+            // The run ends before the first record of a later week.
+            let run = &records[i..];
+            let run = &run[..run
+                .iter()
+                .position(|r| iso_week(r.ts_us()) > active.week)
+                .unwrap_or(run.len())];
+            i += run.len();
+            if let Some(p) = &mut self.pause {
+                p.missed += run.len() as u64;
+                self.status.missed += run.len() as u64;
+                continue;
+            }
+            if let Some(last) = active.store.append_many(run)? {
+                self.next = ChainStart {
+                    seq: last.seq + 1,
+                    prev_hash: last.hash,
+                };
+            }
+            written += run.len();
         }
-        if let Some(p) = &mut self.pause {
-            p.missed += 1;
-            self.status.missed += 1;
-            return Ok(Written::Dropped);
-        }
-        let active = self
-            .active
-            .as_mut()
-            .ok_or_else(|| StoreError::Layout("no active segment".to_string()))?;
-        let appended = active.store.append(record)?;
-        self.next = ChainStart {
-            seq: appended.seq + 1,
-            prev_hash: appended.hash,
-        };
-        Ok(Written::Row)
+        Ok(written)
     }
 
     /// Applies the limits: age, then size, then free space; pauses or resumes writing.

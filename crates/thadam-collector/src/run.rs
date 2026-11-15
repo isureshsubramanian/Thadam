@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thadam_core::{EventRecord, Redactor};
-use thadam_store::{SegmentStatus, SegmentWriter, StoreError, Written};
+use thadam_store::{SegmentStatus, SegmentWriter, StoreError};
 use thiserror::Error;
 
 use crate::coverage::{self, Beat, Heartbeat};
@@ -50,6 +50,10 @@ pub const LOGGER_EVENTS: &[&str] = &[
 const ITEM_BUFFER: usize = 65_536;
 /// Of `ITEM_BUFFER`, how many agent items may wait at once (ADR-015 Decision 2; estimate).
 const AGENT_SLOTS: usize = 2_048;
+/// The writer's group: at most this many records per transaction, gathered for at most
+/// `GROUP_WAIT` (ADR-015 Decision 4; estimates). A crash loses at most the open group.
+const GROUP_ROWS: usize = 500;
+const GROUP_WAIT: Duration = Duration::from_millis(50);
 /// Records buffered for the writer (estimate, ADR-003 Decision 8).
 const RECORD_BUFFER: usize = 10_000;
 /// How long to keep draining after a stop request before giving up on the source.
@@ -359,13 +363,29 @@ fn write_all(
     store.maintain(now_us())?;
     publish(&store);
     let mut last_maintain = Instant::now();
+    let mut group = Vec::with_capacity(GROUP_ROWS);
     loop {
+        let mut ended = false;
         match rx.recv_timeout(MAINTAIN_EVERY) {
             Ok(record) => {
-                let before = store.status();
-                if store.append(&record, now_us())? == Written::Row {
-                    written.fetch_add(1, Ordering::Relaxed);
+                // What is queued already, and what arrives within `GROUP_WAIT`, goes in one
+                // transaction (ADR-015 Decision 4).
+                group.clear();
+                group.push(record);
+                let until = Instant::now() + GROUP_WAIT;
+                while group.len() < GROUP_ROWS {
+                    match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                        Ok(record) => group.push(record),
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            ended = true;
+                            break;
+                        }
+                    }
                 }
+                let before = store.status();
+                let n = store.append_many(&group, now_us())?;
+                written.fetch_add(n as u64, Ordering::Relaxed);
                 // A rollover opens a segment and runs the limits, so the figures (and the
                 // pause state) can change here, not only on the minute.
                 let after = store.status();
@@ -378,6 +398,9 @@ fn write_all(
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if ended {
+            break;
         }
         if last_maintain.elapsed() >= MAINTAIN_EVERY {
             let was_paused = store.status().paused;
