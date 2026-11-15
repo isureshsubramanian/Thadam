@@ -10,6 +10,11 @@
 # scripts/signing.local). Notarization uses a notarytool keychain profile, named by
 # THADAM_NOTARY_PROFILE (default "thadam-notary"); its secret stays in the keychain.
 # --no-notarize builds a local test package (no secure timestamps, not notarized).
+# Every notarized package carries a new version: the patch number in Cargo.toml goes up by
+# one, and once Apple accepts the package the bump is committed as "chore(release): x.y.z"
+# and tagged vx.y.z, so each tag is exactly what shipped. It needs a clean working tree and
+# refuses a version that is already tagged; a failed build puts the version back.
+# A test package keeps the current version and bumps nothing.
 # --without-network leaves the network extension out. With it, the two Developer ID
 # provisioning profiles, named after the bundle ids, must be installed for Xcode.
 set -euo pipefail
@@ -41,9 +46,35 @@ timestamp=(--timestamp)
 [[ "$notarize" == 0 ]] && timestamp=(--timestamp=none)
 
 version="$(awk -F'"' '/^version *=/ { print $2; exit }' Cargo.toml)"
+bumped=0
+if [[ "$notarize" == 1 ]]; then
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Commit or stash your changes first: the release tag must match what is packaged." >&2
+        exit 1
+    fi
+    if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        echo "Cargo.toml version \"$version\" is not x.y.z." >&2
+        exit 1
+    fi
+    version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+    if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+        echo "Tag v$version already exists; set the next version in Cargo.toml by hand." >&2
+        exit 1
+    fi
+    echo "== Version $version"
+    sed -i '' -E "/^\[workspace\.package\]/,/^\[/ s/^version = \"[^\"]*\"/version = \"$version\"/" Cargo.toml
+    cargo update --workspace --offline -q
+    bumped=1
+fi
 out="target/package"
 stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
+cleanup() {
+    rm -rf "$stage"
+    # Not released: put the version back so the next run bumps from the same place.
+    [[ "$bumped" == 1 ]] && git checkout -q -- Cargo.toml Cargo.lock
+    return 0
+}
+trap cleanup EXIT
 root="$stage/root"
 thadam="$root/Library/Application Support/Thadam"
 mkdir -p "$thadam/bin" "$out"
@@ -134,6 +165,10 @@ if [[ "$notarize" == 1 ]]; then
     xcrun stapler staple "$pkg"
     xcrun stapler validate "$pkg"
     spctl --assess --type install -vv "$pkg"
+    git commit -q -m "chore(release): $version" -- Cargo.toml Cargo.lock
+    git tag -a "v$version" -m "Thadam $version"
+    bumped=0
+    echo "Committed and tagged v$version (not pushed)."
 else
     pkgutil --check-signature "$pkg" | sed -n '1,4p'
     echo "Local test package (not notarized): Gatekeeper will refuse it on another Mac."
