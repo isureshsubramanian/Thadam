@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Thadam "trail" mark: steps along a path ending in a ring. The tile uses the macOS icon grid (824 px shape, 100 px margin). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#25395f"/>
+      <stop offset="1" stop-color="#142238"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <path d="M270 740 C 380 700, 400 560, 520 520 S 690 400, 720 330" fill="none" stroke="#e8b85a" stroke-opacity="0.28" stroke-width="22" stroke-linecap="round" stroke-dasharray="2 46"/>
+  <circle cx="270" cy="740" r="38" fill="#e8b85a" fill-opacity="0.45"/>
+  <circle cx="400" cy="640" r="44" fill="#e8b85a" fill-opacity="0.65"/>
+  <circle cx="530" cy="515" r="50" fill="#e8b85a" fill-opacity="0.85"/>
+  <circle cx="720" cy="330" r="92" fill="none" stroke="#f3cf7a" stroke-width="44"/>
+  <circle cx="720" cy="330" r="30" fill="#f3cf7a"/>
+</svg>

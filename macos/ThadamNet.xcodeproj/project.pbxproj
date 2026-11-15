@@ -7,13 +7,13 @@
 		7A0E5C1D0000000000000001 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2700; LastUpgradeCheck = 2700; }; buildConfigurationList = 7A0E5C1D0000000000000035; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = 7A0E5C1D0000000000000002; productRefGroup = 7A0E5C1D0000000000000003; projectDirPath = ""; projectRoot = ""; targets = (7A0E5C1D000000000000000A, 7A0E5C1D000000000000000B, ); };
 		7A0E5C1D0000000000000002 = {isa = PBXGroup; children = (7A0E5C1D0000000000000004, 7A0E5C1D0000000000000005, 7A0E5C1D0000000000000006, 7A0E5C1D0000000000000007, 7A0E5C1D0000000000000003, ); sourceTree = "<group>"; };
 		7A0E5C1D0000000000000003 = {isa = PBXGroup; children = (7A0E5C1D0000000000000008, 7A0E5C1D0000000000000009, ); name = Products; sourceTree = "<group>"; };
-		7A0E5C1D0000000000000004 = {isa = PBXGroup; children = (7A0E5C1D000000000000000C, 7A0E5C1D000000000000000D, 7A0E5C1D000000000000000E, ); path = App; sourceTree = "<group>"; };
+		7A0E5C1D0000000000000004 = {isa = PBXGroup; children = (7A0E5C1D000000000000000C, 7A0E5C1D000000000000000D, 7A0E5C1D000000000000000E, 7A0E5C1D0000000000000036, ); path = App; sourceTree = "<group>"; };
 		7A0E5C1D0000000000000005 = {isa = PBXGroup; children = (7A0E5C1D000000000000000F, 7A0E5C1D0000000000000010, 7A0E5C1D0000000000000011, 7A0E5C1D0000000000000012, ); path = Filter; sourceTree = "<group>"; };
 		7A0E5C1D0000000000000006 = {isa = PBXGroup; children = (7A0E5C1D0000000000000013, 7A0E5C1D0000000000000014, 7A0E5C1D0000000000000015, 7A0E5C1D0000000000000016, 7A0E5C1D0000000000000017, 7A0E5C1D0000000000000018, 7A0E5C1D0000000000000019, ); name = ThadamNetKit; path = ThadamNetKit/Sources/ThadamNetKit; sourceTree = "<group>"; };
 		7A0E5C1D0000000000000007 = {isa = PBXGroup; children = (7A0E5C1D000000000000001A, ); path = Config; sourceTree = "<group>"; };
 		7A0E5C1D0000000000000008 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThadamNet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7A0E5C1D0000000000000009 = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = com.nerttiyana.thadam.net.filter.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
-		7A0E5C1D000000000000000A = {isa = PBXNativeTarget; buildConfigurationList = 7A0E5C1D0000000000000031; buildPhases = (7A0E5C1D000000000000001B, 7A0E5C1D0000000000000027, 7A0E5C1D0000000000000029, ); buildRules = (); dependencies = (7A0E5C1D000000000000002C, ); name = ThadamNet; productName = ThadamNet; productReference = 7A0E5C1D0000000000000008; productType = "com.apple.product-type.application"; };
+		7A0E5C1D000000000000000A = {isa = PBXNativeTarget; buildConfigurationList = 7A0E5C1D0000000000000031; buildPhases = (7A0E5C1D000000000000001B, 7A0E5C1D0000000000000027, 7A0E5C1D0000000000000038, 7A0E5C1D0000000000000029, ); buildRules = (); dependencies = (7A0E5C1D000000000000002C, ); name = ThadamNet; productName = ThadamNet; productReference = 7A0E5C1D0000000000000008; productType = "com.apple.product-type.application"; };
 		7A0E5C1D000000000000000B = {isa = PBXNativeTarget; buildConfigurationList = 7A0E5C1D0000000000000034; buildPhases = (7A0E5C1D000000000000001D, 7A0E5C1D0000000000000028, ); buildRules = (); dependencies = (); name = ThadamNetFilter; productName = ThadamNetFilter; productReference = 7A0E5C1D0000000000000009; productType = "com.apple.product-type.system-extension"; };
 		7A0E5C1D000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		7A0E5C1D000000000000000D = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -57,6 +57,9 @@
 		7A0E5C1D0000000000000033 = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_NAME = com.nerttiyana.thadam.net.filter; PRODUCT_MODULE_NAME = ThadamNetFilter; PRODUCT_BUNDLE_IDENTIFIER = com.nerttiyana.thadam.net.filter; INFOPLIST_FILE = Filter/Info.plist; CODE_SIGN_ENTITLEMENTS = Filter/ThadamNetFilter.entitlements; SKIP_INSTALL = YES; }; name = Release; };
 		7A0E5C1D0000000000000034 = {isa = XCConfigurationList; buildConfigurations = (7A0E5C1D0000000000000032, 7A0E5C1D0000000000000033, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		7A0E5C1D0000000000000035 = {isa = XCConfigurationList; buildConfigurations = (7A0E5C1D000000000000002D, 7A0E5C1D000000000000002E, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		7A0E5C1D0000000000000036 = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+		7A0E5C1D0000000000000037 = {isa = PBXBuildFile; fileRef = 7A0E5C1D0000000000000036; };
+		7A0E5C1D0000000000000038 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (7A0E5C1D0000000000000037, ); runOnlyForDeploymentPostprocessing = 0; };
 	};
 	rootObject = 7A0E5C1D0000000000000001;
 }

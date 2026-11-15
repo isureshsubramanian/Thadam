@@ -19,6 +19,7 @@
 !/scripts/
 /scripts/*
 !/scripts/gate.sh
+!/scripts/icon.sh
 !/scripts/install-api.sh
 !/scripts/install-collector.sh
 !/scripts/install-hooks.sh
