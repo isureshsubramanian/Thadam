@@ -179,3 +179,14 @@ fn a_broken_old_log_is_not_imported() {
     assert!(db.import(tmp.path("old.db")).is_err());
     assert!(db.is_empty().unwrap());
 }
+
+#[test]
+fn a_symlinked_old_log_is_not_imported() {
+    let tmp = TempDir::new("symlink");
+    old_log(&tmp.path("real.db"));
+    std::os::unix::fs::symlink(tmp.path("real.db"), tmp.path("old.db")).unwrap();
+    let mut db = AuditDb::open(tmp.path("audit.db")).unwrap();
+    let err = db.import(tmp.path("old.db")).unwrap_err().to_string();
+    assert!(err.contains("symlink"), "{err}");
+    assert!(db.is_empty().unwrap());
+}

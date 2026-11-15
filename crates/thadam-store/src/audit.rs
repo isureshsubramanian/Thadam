@@ -11,6 +11,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use thadam_core::{AuditRow, GENESIS, audit_hash};
 
@@ -112,8 +113,36 @@ impl AuditDb {
     /// Copies every entry of the API's old, user-owned log into this one, byte for byte
     /// (ADR-013 Decision 3). Only into an empty log, and only a source whose chain verifies;
     /// the copy is walked again before it commits, so a failure leaves this log empty.
+    ///
+    /// The source belongs to the user, so it is treated as hostile: a symlink is refused (it
+    /// could point root at any file), and it is opened read-only in SQLite's defensive mode
+    /// with its schema untrusted, so nothing in it can run as root.
     pub fn import(&mut self, source: impl AsRef<Path>) -> Result<u64, StoreError> {
-        let src = Self::open_read_only(source)?;
+        let source = source.as_ref();
+        if std::fs::symlink_metadata(source)?.file_type().is_symlink() {
+            return Err(StoreError::Layout(
+                "the old audit log is a symlink; nothing copied".to_string(),
+            ));
+        }
+        // SQLite's no-follow also refuses a symlink among the folders (`/var` is one), so the
+        // folder is resolved and only the file itself is held to it.
+        let resolved = match (source.parent(), source.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+                dir.canonicalize()?.join(name)
+            }
+            _ => source.to_path_buf(),
+        };
+        let conn = Connection::open_with_flags(
+            resolved,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version != AUDIT_VERSION {
+            return Err(StoreError::SchemaVersion(version));
+        }
+        let src = Self { conn };
         let rows = stored(&src.conn)?;
         let report = verify_rows(&rows)?;
         if let Some(seq) = report.broken_at {

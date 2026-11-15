@@ -38,7 +38,8 @@ for _ in $(seq 1 40); do
     [[ -S "$audit_socket" ]] && break
     sleep 0.25
 done
-if [[ -f "$data/audit.db" ]]; then
+# Only the user's own regular file: root must not be pointed at another file by a symlink.
+if [[ -f "$data/audit.db" && ! -L "$data/audit.db" && "$(stat -f %Su "$data/audit.db")" == "$user" ]]; then
     # Refused (and harmless) once the system log has entries: the copy happens once.
     "$bin/thadam-collector" import-audit --from "$data/audit.db" --audit-db "$audit_db" \
         || echo "thadam: old audit log not copied (already copied, or see above)"
