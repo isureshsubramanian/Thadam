@@ -36,8 +36,19 @@ if [[ -f "$data/audit.db" ]]; then
         || echo "thadam: old audit log not copied (already copied, or see above)"
 fi
 if [[ -f "$data/credentials.json" ]]; then
-    launchctl asuser "$uid" sudo -u "$user" "$app/thadam-api" install \
-        --audit-socket "$audit_socket" --audit-db "$audit_db" || echo "thadam: API launch agent not installed"
+    # The user writes their own launch agent file. Loading it into their login domain from
+    # here can be refused (seen live 15 Nov 2026: the old agent was stopped, the new one not
+    # loaded), so root loads it then.
+    agent="$home/Library/LaunchAgents/com.nerttiyana.thadam.api.plist"
+    if ! launchctl asuser "$uid" sudo -u "$user" "$app/thadam-api" install \
+        --audit-socket "$audit_socket" --audit-db "$audit_db"; then
+        launchctl bootout "gui/$uid/com.nerttiyana.thadam.api" 2>/dev/null
+        if [[ -f "$agent" ]] && launchctl bootstrap "gui/$uid" "$agent"; then
+            echo "thadam: API launch agent loaded"
+        else
+            echo "thadam: API launch agent not installed; run '$app/thadam-api install --audit-socket $audit_socket --audit-db \"$audit_db\"' as the user"
+        fi
+    fi
     # The copy an earlier install script left in the data folder is no longer used.
     [[ -d "$data/app" ]] && sudo -u "$user" rm -rf "$data/app"
 else
