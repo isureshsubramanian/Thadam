@@ -1,5 +1,5 @@
 // Sessions list and session timeline (mock-up view 3), with delegated child sessions.
-// Prompt rows appear once Phase 4 adapters record them (ADR-008, Risks).
+// Prompt rows and other rows the tool reports come from its hook (ADR-011 Decision 6).
 import { useState } from "react";
 import { api } from "../api/client";
 import type { Session } from "../api/schemas";
@@ -86,7 +86,7 @@ function Timeline({ sessionId }: { sessionId: string }) {
       )}
       <div className="row">
         <input id="internal" type="checkbox" checked={internal} onChange={(e) => { setInternal(e.target.checked); }} />
-        <label htmlFor="internal">Show tool-internal activity (the tool&apos;s own state folder)</label>
+        <label htmlFor="internal">Show tool-internal activity (the tool&apos;s own state folder and helper sessions)</label>
       </div>
       <section className="card">
         {page.items === undefined ? page.loading && <Loading /> : page.items.length === 0 ? <Empty>No rows.</Empty> : <EventTable events={page.items} showTool showDay />}

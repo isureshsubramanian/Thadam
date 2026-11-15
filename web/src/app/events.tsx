@@ -1,8 +1,9 @@
 // Stored rows as a table: the timeline and search share it. Every value is rendered as
 // text; nothing from the store becomes markup (ADR-008 Decision 3).
+import { Copy } from "lucide-react";
 import type { Event } from "../api/schemas";
 import { bytes, categoryName, clock, day, num, words } from "./format";
-import { FlagPills, SeverityPill } from "./ui";
+import { FlagPills, IconButton, SeverityPill } from "./ui";
 
 function detail(e: Event): string {
   const parts: string[] = [];
@@ -15,8 +16,29 @@ function detail(e: Event): string {
 
 function outcomeClass(outcome: string): string {
   if (outcome.startsWith("denied")) return "pill denied";
-  if (outcome === "failed") return "pill flag";
+  if (outcome === "failed" || outcome === "never_ran") return "pill flag";
   return "pill";
+}
+
+/**
+ * Rows the tool's hook sent (ADR-011 Decision 6): what the tool says happened, not what the OS
+ * saw. The transcript is a path to copy, never a link: the browser must not open local files.
+ */
+function Reported() {
+  return <span className="pill acc" title="Sent by the tool's hook, not observed by macOS">reported by the tool</span>;
+}
+
+function Transcript({ path }: { path: string }) {
+  const copy = () => { void navigator.clipboard.writeText(path).catch(() => undefined); };
+  return (
+    <span className="detail transcript">
+      <span className="label">transcript</span>
+      <span className="mono">{path}</span>
+      <IconButton label="Copy transcript path" onClick={copy}>
+        <Copy className="ic" aria-hidden="true" />
+      </IconButton>
+    </span>
+  );
 }
 
 export function EventTable({ events, showTool, showDay }: { events: readonly Event[]; showTool?: boolean; showDay?: boolean }) {
@@ -38,10 +60,14 @@ export function EventTable({ events, showTool, showDay }: { events: readonly Eve
             <tr key={e.seq}>
               <td className="mono">{showDay === true ? `${day(e.ts)} ` : ""}{clock(e.ts)}</td>
               {showTool === true && <td>{e.displayName}</td>}
-              <td>{categoryName[e.category] ?? words(e.category)} · {e.action}</td>
-              <td className="mono wrap">
+              <td>
+                {categoryName[e.category] ?? words(e.category)} · {e.action}
+                {e.source === "agent" && <span className="detail"><Reported /></span>}
+              </td>
+              <td className={e.category === "prompt" ? "wrap" : "mono wrap"}>
                 {e.target}
                 {detail(e) !== "" && <span className="detail">{detail(e)}</span>}
+                {e.transcript !== null && <Transcript path={e.transcript} />}
               </td>
               <td><span className={outcomeClass(e.outcome)}>{words(e.outcome)}</span></td>
               <td>

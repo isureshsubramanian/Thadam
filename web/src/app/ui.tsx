@@ -27,7 +27,7 @@ export function FlagPills({ flags }: { flags: readonly string[] }) {
   return (
     <>
       {flags.map((f) => (
-        <span key={f} className={`pill ${f === "tool_internal" || f === "rolled_up" ? "" : "flag"}`}>
+        <span key={f} className={`pill ${f === "tool_internal" || f === "internal" || f === "rolled_up" ? "" : "flag"}`}>
           {words(f)}
         </span>
       ))}

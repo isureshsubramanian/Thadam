@@ -103,6 +103,10 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .tbl.events td { padding: 10px 12px; }
 .tbl.events th { padding: 10px 12px; }
 .tbl.events .detail { display: block; margin-top: 4px; font-family: var(--font); color: var(--muted); }
+.tbl.events .transcript { display: flex; align-items: center; gap: 6px; }
+.tbl.events .transcript .label { flex: none; }
+.tbl.events .transcript .mono { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.tbl.events .transcript .ibtn { width: 28px; height: 28px; }
 
 .bars, .hosts, .plain { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
 /* Long lists scroll inside their card (about ten rows), not the whole page. */

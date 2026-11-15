@@ -96,6 +96,21 @@ describe("dashboard", () => {
     expect(document.querySelector("img")).toBeNull();
   });
 
+  it("marks the rows the tool reported and offers its transcript path to copy, not open", async () => {
+    fake.install({ ...base, "GET /sessions/s-b1": { status: 200, body: fake.timeline } });
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    window.location.hash = "#/sessions/s-b1";
+    render(<App />);
+    expect(await screen.findByText("fix the failing test")).toBeTruthy();
+    expect(screen.getAllByText("reported by the tool")).toHaveLength(2);
+    expect(screen.getByText("never ran").className).toContain("flag");
+    expect(screen.getAllByText("/Users/dev/.cli-agent/a-51c2.jsonl")).toHaveLength(2);
+    expect(document.querySelector("a[href^='file:']")).toBeNull();
+    fireEvent.click(screen.getAllByRole("button", { name: "Copy transcript path" })[0] as HTMLElement);
+    expect(writeText).toHaveBeenCalledWith("/Users/dev/.cli-agent/a-51c2.jsonl");
+  });
+
   it("a rejected search names the field, not the text typed", async () => {
     fake.install({ ...base, "GET /events": { status: 400, body: { errors: ["q.tool"] } } });
     window.location.hash = `#/search?q=${encodeURIComponent("tool:secret_name")}`;

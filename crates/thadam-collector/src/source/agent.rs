@@ -326,10 +326,10 @@ mod tests {
             // As the hook does: wait for the acknowledgement, then close.
             wait_ack(&mut client);
             drop(client);
-            assert_eq!(
-                rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-                AgentItem::Rejected(reason)
-            );
+            let got = rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|e| panic!("no item for the {reason:?} case: {e}"));
+            assert_eq!(got, AgentItem::Rejected(reason));
         }
         fs::remove_dir_all(dir).unwrap();
     }

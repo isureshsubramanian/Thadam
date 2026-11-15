@@ -132,6 +132,9 @@ export const event = z.object({
   source: z.string(),
   severity: severity.nullable(),
   rule: z.string().nullable(),
+  /** Agent rows only (ADR-011): the tool's own session ID and its transcript file. */
+  agentSessionId: z.string().nullable(),
+  transcript: z.string().nullable(),
 });
 export type Event = z.infer<typeof event>;
 
