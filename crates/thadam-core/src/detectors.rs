@@ -59,10 +59,23 @@ impl SecretDetector {
             // Key names, also inside longer variable names such as `SERVICE_API_KEY` or
             // `DB_PASSWORD_PRIMARY` (words joined by `_` or `-`).
             r#"(?i)\b(?:[A-Za-z0-9]+[_-])*(?:api_key|api-key|apikey|access_key|secret|client_secret|token|access_token|password|passwd|pwd)(?:[_-][A-Za-z0-9]+)*\b\s*[:=]\s*(?:"([^"\s]{4,})"|'([^'\s]{4,})'|([^\s"']{4,}))"#,
-            r#"(?i)(?:^|\s)--(?:password|token|api-key|secret)(?:=|[ \t]+)(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"']+))"#,
+            // Environment variables whose name ends in a key word with no separator, such as
+            // `PGPASSWORD`. Upper case only, as environment names are, so that ordinary words
+            // such as `notpassword` stay text.
+            r#"\b[A-Z][A-Z0-9]*(?:PASSWORD|PASSWD|TOKEN|SECRET|APIKEY)(?:_[A-Z0-9]+)*\s*=\s*(?:"([^"\s]{4,})"|'([^'\s]{4,})'|([^\s"']{4,}))"#,
+            // Flags ending in a key word, such as `--password`, `--auth-token` or `--api-key`.
+            // A spaced value starting with `-` is the next flag (`--no-password --verbose`).
+            r#"(?i)(?:^|\s)--(?:[A-Za-z0-9]+-)*(?:password|passwd|token|secret|api-key|apikey|access-key)(?:=(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"']+))|[ \t]+(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"'-][^\s"']*)))"#,
+            // Database clients take the password glued to `-p`; `-P` is the port.
+            r#"(?:^|[\s/])(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&\n]*?[ \t]-p([^\s"'-][^\s"']*)"#,
+            r#"(?:^|[\s/])sshpass\b[^|;&\n]*?[ \t]-p[ \t]*([^\s"'-][^\s"']*)"#,
+            // `-u user:password` and `--user user:password`: the part after the colon.
+            r#"(?:^|\s)(?:-u|--user)(?:[ \t]+|=)(?:"[^"\s:]*:([^"\s]+)"|'[^'\s:]*:([^'\s]+)'|[^\s"':]*:([^\s"']+))"#,
             r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@",
             // Well-known provider token prefixes.
-            r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}\b|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b)",
+            r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}\b|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}\b|hf_[A-Za-z0-9]{30,})",
+            // A signed token (header.payload.signature) with or without `Bearer`.
+            r"\b(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})",
         ];
         Ok(Self {
             values: patterns
@@ -296,6 +309,75 @@ mod tests {
             "--tokenize abcd1234",
         ] {
             assert!(values(DetectorKind::Secret, text).is_empty());
+        }
+    }
+
+    #[test]
+    fn forms_that_used_to_get_past() {
+        for (text, secret) in [
+            ("PGPASSWORD=abcd1234 psql -h db", "abcd1234"),
+            ("export GITHUBTOKEN='abcd1234'", "abcd1234"),
+            ("MYSECRET_PRIMARY=abcd1234", "abcd1234"),
+            ("tool --auth-token abcd1234", "abcd1234"),
+            ("tool --access-token=abcd1234", "abcd1234"),
+            ("tool --github-token \"abcd1234\"", "abcd1234"),
+            ("tool --db-password X", "X"),
+            ("mysql -u root -pS3cretPw sample", "S3cretPw"),
+            ("/usr/local/bin/mysqldump -h db -pS3cretPw", "S3cretPw"),
+            ("sshpass -p madeup-pw ssh dev@example.test", "madeup-pw"),
+            ("sshpass -pmadeup-pw ssh host", "madeup-pw"),
+            (
+                "curl -u mira:madeup-pass https://example.test",
+                "madeup-pass",
+            ),
+            (
+                "curl --user=mira:madeup-pass https://example.test",
+                "madeup-pass",
+            ),
+            (
+                "curl -u 'mira:madeup-pass' https://example.test",
+                "madeup-pass",
+            ),
+        ] {
+            assert_eq!(values(DetectorKind::Secret, text), [secret], "{text}");
+        }
+        for (prefix, count) in [
+            ("sk_live_", 24),
+            ("rk_live_", 24),
+            ("sk_test_", 24),
+            ("glpat-", 20),
+            ("npm_", 36),
+            ("hf_", 34),
+        ] {
+            let token = format!("{prefix}{}", "a".repeat(count));
+            assert_eq!(
+                values(DetectorKind::Secret, &format!("use {token} now")),
+                [token.as_str()]
+            );
+        }
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aCJ9.c2lnbmF0dXJlLW1hZGV1cA";
+        assert_eq!(
+            values(DetectorKind::Secret, &format!("cookie={jwt};")),
+            [jwt]
+        );
+        let out = Redactor::with_default_detectors()
+            .unwrap()
+            .redact(&format!("curl -H 'Authorization: Bearer {jwt}' x"));
+        assert_eq!(out.text, "curl -H 'Authorization: Bearer [SECRET]' x");
+        for text in [
+            "max_tokens=1000",
+            "MAX_TOKENS=1000",
+            "OLDPWD=/tmp/sample",
+            "tool --no-password --verbose",
+            "tool --token-file ./sample",
+            "mysql -u root -P3306 -h db",
+            "mysql -p sample",
+            "sort -u names.txt",
+            "git log -u",
+            "curl -u mira https://example.test",
+            "eyJhbGciOiJIUzI1NiJ9 alone",
+        ] {
+            assert!(values(DetectorKind::Secret, text).is_empty(), "{text}");
         }
     }
 
