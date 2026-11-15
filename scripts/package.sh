@@ -84,8 +84,14 @@ if [[ "$network" == 1 ]]; then
     # Manual signing with the Developer ID profiles: the automatic development profiles do not
     # carry the "-systemextension" entitlement values. Each profile is named after its
     # target's bundle id and must be installed in Xcode's profile folder.
+    # macOS keeps an activated system extension whose version equals the new one, so an
+    # upgrade would leave the old build running (seen live 15 Nov 2026: a development-signed
+    # filter stayed active beside the Developer ID app and was refused at boot). The build
+    # number is the commit count, so every package carries a higher one.
+    build="$(git rev-list --count HEAD)"
     xcodebuild -quiet -project macos/ThadamNet.xcodeproj -scheme ThadamNet -configuration Release \
         -archivePath "$stage/ThadamNet.xcarchive" archive \
+        CURRENT_PROJECT_VERSION="$build" \
         THADAM_NE_ENTITLEMENT_SUFFIX=-systemextension \
         CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$app_id" \
         'PROVISIONING_PROFILE_SPECIFIER=$(PRODUCT_BUNDLE_IDENTIFIER)'

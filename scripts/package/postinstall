@@ -23,6 +23,14 @@ if [[ -z "$user" || "$user" == root || "$user" == loginwindow ]]; then
     exit 0
 fi
 uid="$(id -u "$user")"
+
+# Ask macOS to activate the network filter shipped in this package; with a higher build
+# number it replaces the one already active. `open` returns at once: the app may wait for
+# approval in System Settings, and the installer must not wait with it.
+if [[ -d /Applications/ThadamNet.app ]]; then
+    launchctl asuser "$uid" sudo -u "$user" open -g /Applications/ThadamNet.app --args activate \
+        || echo "thadam: network filter not activated; run /Applications/ThadamNet.app/Contents/MacOS/ThadamNet activate"
+fi
 home="$(dscl . -read "/Users/$user" NFSHomeDirectory | awk '{ print $2 }')"
 data="$home/Library/Application Support/Thadam/api"
 
