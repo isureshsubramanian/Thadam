@@ -104,6 +104,9 @@ wire_enum!(
         Continued => "continued",
         // Reported by a tool's own helper session, not typed by the user (ADR-011 amendment 1).
         Internal => "internal",
+        // Hands work to launchd, another app or a scheduler, which runs it outside the tool's
+        // process tree, where it is not recorded (ADR-015 Decision 3).
+        LaunchOutside => "launch_outside",
     }
 );
 

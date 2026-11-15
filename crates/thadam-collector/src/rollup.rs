@@ -27,6 +27,7 @@ const KEEP_FLAGS: &[Flag] = &[
     Flag::SensitivePath,
     Flag::OutsideProject,
     Flag::SecretPattern,
+    Flag::LaunchOutside,
     Flag::Unconfirmed,
 ];
 

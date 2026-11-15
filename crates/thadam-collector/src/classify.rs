@@ -27,6 +27,15 @@ const SENSITIVE_HOME_DIRS: &[&str] = &[".ssh", ".gnupg", "Library/Keychains", ".
 const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "p12", "key"];
 const SENSITIVE_NAME_PREFIXES: &[&str] = &["id_rsa", "id_ed25519"];
 
+/// `launchctl` subcommands that start a job outside the caller's process tree (ADR-015
+/// Decision 3). `list`, `print` and the like only read.
+const LAUNCHCTL_STARTS: &[&str] = &["submit", "load", "bootstrap", "kickstart", "asuser"];
+/// Programs whose every run hands work to another process or a later time.
+const ALWAYS_HAND_OFF: &[&str] = &["osascript", "crontab", "at"];
+/// Folders whose property lists launchd starts by itself.
+const LAUNCH_FOLDERS: &[&str] = &["/Library/LaunchAgents/", "/Library/LaunchDaemons/"];
+const HOME_LAUNCH_FOLDER: &str = "Library/LaunchAgents/";
+
 /// The record for an event, or `None` for events that only update the tree.
 pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Option<NewEvent> {
     let tool = registry.tool(member.tool)?;
@@ -91,6 +100,16 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
     for path in &paths {
         flags.extend(path_flags(path, tool, member, registry));
     }
+    let hands_off = match &event.kind {
+        EventKind::Exec { target, args, .. } => launches_outside(&target.executable, args),
+        _ => {
+            matches!(action, Action::Write | Action::Create | Action::Rename)
+                && paths.iter().any(|p| is_launch_folder(p))
+        }
+    };
+    if hands_off {
+        flags.insert(Flag::LaunchOutside);
+    }
 
     Some(NewEvent {
         ts: event.ts,
@@ -112,6 +131,33 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
         sources: BTreeSet::from([Source::Os]),
         agent: None,
     })
+}
+
+/// True when the command starts something launchd, another app or a scheduler will run,
+/// outside the tool's process tree. `args` includes the program name, as the OS reports it.
+fn launches_outside(executable: &str, args: &[String]) -> bool {
+    let name = executable.rsplit('/').next().unwrap_or(executable);
+    let rest = args.get(1..).unwrap_or_default();
+    match name {
+        "launchctl" => rest
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .is_some_and(|sub| LAUNCHCTL_STARTS.contains(&sub.as_str())),
+        // `-a`/`-b` name an app, `-n` starts a new instance, possibly in a cluster as `-na`;
+        // a plain `open file.txt` or `open https://...` hands a document to its usual app.
+        "open" => rest.iter().any(|a| {
+            let a = a.trim_end_matches('/');
+            a.ends_with(".app")
+                || a == "--new"
+                || (a.starts_with('-') && !a.starts_with("--") && a.contains(['a', 'b', 'n']))
+        }),
+        _ => ALWAYS_HAND_OFF.contains(&name),
+    }
+}
+
+fn is_launch_folder(path: &str) -> bool {
+    LAUNCH_FOLDERS.iter().any(|f| under(path, f))
+        || home_relative(path).is_some_and(|rel| under(rel, HOME_LAUNCH_FOLDER))
 }
 
 type Parts = (Category, Action, String, Option<i64>, String, Vec<String>);
@@ -308,6 +354,112 @@ mod tests {
         );
         assert_eq!(rec.project.as_deref(), PROJECT);
         assert_eq!(rec.tool, "cli_agent");
+    }
+
+    fn exec_flags(executable: &str, args: &[&str]) -> BTreeSet<Flag> {
+        let r = registry();
+        let target = ProcessRef {
+            executable: executable.into(),
+            ..ev(EventKind::Exit).process
+        };
+        classify(
+            &ev(EventKind::Exec {
+                target,
+                args: args.iter().map(|a| a.to_string()).collect(),
+                cwd: Some("/Users/test/projects/demo".into()),
+            }),
+            &member(&r, PROJECT),
+            &r,
+        )
+        .unwrap()
+        .flags
+    }
+
+    #[test]
+    fn hand_offs_outside_the_tree_are_flagged() {
+        let launches: &[(&str, &[&str])] = &[
+            (
+                "/bin/launchctl",
+                &["launchctl", "submit", "-l", "job", "--", "/bin/sh"],
+            ),
+            (
+                "/bin/launchctl",
+                &["launchctl", "load", "-w", "agent.plist"],
+            ),
+            (
+                "/bin/launchctl",
+                &["launchctl", "bootstrap", "gui/501", "agent.plist"],
+            ),
+            (
+                "/bin/launchctl",
+                &["launchctl", "kickstart", "-k", "gui/501/job"],
+            ),
+            ("/bin/launchctl", &["launchctl", "asuser", "501", "/bin/sh"]),
+            (
+                "/usr/bin/osascript",
+                &["osascript", "-e", "do shell script \"x\""],
+            ),
+            ("/usr/bin/open", &["open", "-a", "Terminal", "run.sh"]),
+            ("/usr/bin/open", &["open", "-b", "com.example.app"]),
+            ("/usr/bin/open", &["open", "-na", "Terminal"]),
+            ("/usr/bin/open", &["open", "/Applications/Sample.app"]),
+            ("/usr/bin/open", &["open", "/Applications/Sample.app/"]),
+            ("/usr/bin/crontab", &["crontab", "jobs.txt"]),
+            ("/usr/bin/at", &["at", "now", "+", "1", "minute"]),
+        ];
+        for (exe, args) in launches {
+            assert!(
+                exec_flags(exe, args).contains(&Flag::LaunchOutside),
+                "{args:?}"
+            );
+        }
+        let ordinary: &[(&str, &[&str])] = &[
+            ("/usr/bin/open", &["open", "notes.txt"]),
+            ("/usr/bin/open", &["open", "https://example.test/docs"]),
+            ("/usr/bin/open", &["open", "-g", "notes.txt"]),
+            ("/bin/launchctl", &["launchctl", "list"]),
+            ("/bin/launchctl", &["launchctl", "print", "gui/501/job"]),
+            ("/usr/bin/git", &["git", "commit", "-m", "load the app"]),
+        ];
+        for (exe, args) in ordinary {
+            assert!(
+                !exec_flags(exe, args).contains(&Flag::LaunchOutside),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn writing_a_launch_property_list_is_flagged() {
+        let r = registry();
+        let create = |path: &str| {
+            classify(
+                &ev(EventKind::Create { path: path.into() }),
+                &member(&r, PROJECT),
+                &r,
+            )
+            .unwrap()
+            .flags
+        };
+        for path in [
+            "/Users/test/Library/LaunchAgents/com.example.job.plist",
+            "/Library/LaunchAgents/com.example.job.plist",
+            "/Library/LaunchDaemons/com.example.job.plist",
+        ] {
+            assert!(create(path).contains(&Flag::LaunchOutside), "{path}");
+        }
+        assert!(
+            !create("/Users/test/projects/demo/LaunchAgents/x.plist")
+                .contains(&Flag::LaunchOutside)
+        );
+        // Reading one only looks.
+        assert!(
+            !flags_for(
+                "/Users/test/Library/LaunchAgents/com.example.job.plist",
+                PROJECT
+            )
+            .contains(&Flag::LaunchOutside)
+        );
     }
 
     #[test]

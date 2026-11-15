@@ -30,6 +30,11 @@ public static class SeverityRule
         {
             return (Severity.High, "sensitive_path");
         }
+        if (flags.Contains("launch_outside"))
+        {
+            // What it starts runs outside the tool's process tree and is not recorded (ADR-015 Decision 3).
+            return (Severity.High, "launch_outside");
+        }
         var unknownHost = flags.Contains("unknown_host");
         var largeUpload = flags.Contains("large_upload");
         if (largeUpload && unknownHost)

@@ -55,6 +55,7 @@ export const words = (wire: string): string => wire.replaceAll("_", " ");
 export const ruleTitle: Record<string, string> = {
   secret: "Secret or sensitive data detected",
   sensitive_path: "Sensitive path accessed",
+  launch_outside: "Started outside the tool's process tree",
   large_upload_unknown_host: "Large upload to an unknown host",
   denied: "Refused by the agent or by you",
   outside_change: "Changed a file outside the project",
