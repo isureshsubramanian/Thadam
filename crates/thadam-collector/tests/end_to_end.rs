@@ -1374,17 +1374,28 @@ fn agent_messages_from_the_hook_become_rows_of_its_session() {
         assert!(stderr.contains("agent_rejected_not_hook=1"), "{stderr}");
         assert!(stderr.contains("agent_refused=0"), "{stderr}");
     }
-    // The hook's own run is kept, marked internal (hidden by default in the dashboard).
-    let db = Store::open_read_only(only_segment(&store).unwrap()).unwrap();
-    let hook_flags: String = db
-        .connection()
-        .query_row(
-            "SELECT flags FROM events WHERE source = 'os' AND target = 'hook'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(hook_flags, "tool_internal");
+    // The hook's own run is kept, marked internal (hidden by default in the dashboard). The
+    // OS rows carry a fixed date and the agent rows the clock's, so they may sit in two
+    // weeks' segments.
+    let mut hook_flags = Vec::new();
+    for entry in std::fs::read_dir(&store).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.starts_with("events-") && name.ends_with(".db")) {
+            continue;
+        }
+        let db = Store::open_read_only(&path).unwrap();
+        let mut stmt = db
+            .connection()
+            .prepare("SELECT flags FROM events WHERE source = 'os' AND target = 'hook'")
+            .unwrap();
+        hook_flags.extend(
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap),
+        );
+    }
+    assert_eq!(hook_flags, ["tool_internal"]);
     let verify = verify_dir(&store).unwrap();
     assert_eq!(verify.broken, None);
 }
