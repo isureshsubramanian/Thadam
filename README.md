@@ -25,7 +25,8 @@ Status: early development (0.1.x). Apple silicon Macs only.
   stored.
 - **Network**: the host, port and bytes sent and received for each connection. Payloads are
   never read.
-- **Prompts and sessions**: through the tools' own hooks, where a tool offers them.
+- **Prompts and sessions**: through the tools' own hooks, where a tool offers them. A
+  command the tool asked you to approve and that never ran is recorded too, as declined.
 
 Thadam never stores file contents or the sensitive values it detects. Activity from programs
 that are not AI tools (most of what happens on a Mac) is dropped in memory and never written.
@@ -34,6 +35,22 @@ It flags activity worth a look: a secret in a command or prompt, a sensitive pat
 or changing files outside the project, a host the tool is not expected to reach, a large
 upload, and actions refused by you, the tool or macOS. Flags wait in a review queue in the
 dashboard, where you mark them reviewed one at a time or in bulk.
+
+## The dashboard
+
+- **Overview**: activity per AI tool, a coverage timeline that shows when Thadam was not
+  recording and why, folders reached outside the project, and the hosts each tool connected to.
+- **Flagged**: the review queue, open or reviewed, by severity.
+- **Sessions**: each tool session with its timeline of files, commands, connections and
+  prompts, including the sessions it delegated to.
+- **Search** across everything kept, in plain text plus fields, for example
+  `tool:"CLI agent" outside:sample-app since:7d` or `outcome:denied since:30d`. The fields
+  are `tool`, `session`, `project`, `outside`, `category`, `action`, `outcome`, `flag`,
+  `host`, `since`, `from` and `to`.
+- **Export**: a search or a session as CSV, up to 100,000 rows, each with its chain hash.
+
+Every list pages 50 rows at a time and has its own search box. Each search and export is
+written to the audit log, without what was searched for.
 
 ## How it works
 
@@ -79,6 +96,9 @@ Releases and open it. Then:
    `sudo "/Library/Application Support/Thadam/bin/thadam-collector" set-password`.
    Setting it again signs every open dashboard out.
 4. **Name your AI tools** in the registry (below), then open <http://127.0.0.1:7341>.
+
+To upgrade, open the newer package. Nothing else is needed: the password, registry and
+record are kept.
 
 ### The registry
 
@@ -137,6 +157,10 @@ filter needs the system extension and content-filter entitlements from Apple.
 ## Privacy and security
 
 - Nothing leaves your Mac. The API listens on the loopback address only.
+- Only `thadam-collector` needs Full Disk Access. The apps you run AI tools in (a terminal,
+  an editor) do not, and leaving it off keeps those tools out of folders macOS protects,
+  such as Mail, Messages and Safari. Thadam keeps recording either way, and records and
+  flags each refused attempt.
 - Never stored: file contents, the exec environment, payloads, detected secret values.
 - The dashboard needs a password. Sessions expire, and every sign-in, review and search is
   in the audit log (ids only, never what was searched for).
