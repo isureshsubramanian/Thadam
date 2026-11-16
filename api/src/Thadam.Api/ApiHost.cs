@@ -68,7 +68,7 @@ public static class ApiHost
         builder.Services.AddSingleton(store);
         var index = new SegmentIndex(store);
         builder.Services.AddSingleton(index);
-        builder.Services.AddSingleton(new StoreQueries(index));
+        builder.Services.AddSingleton(new StoreQueries(index, time));
         builder.Services.AddSingleton<ToolRegistry>();
         var search = await SearchIndex.OpenAsync(options.SearchPath, ct).ConfigureAwait(false);
         builder.Services.AddSingleton(_ => search);

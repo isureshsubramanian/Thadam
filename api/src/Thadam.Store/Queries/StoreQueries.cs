@@ -7,8 +7,18 @@ namespace Thadam.Store.Queries;
 /// opens only the segments whose rows overlap its time range, runs the same parameterised
 /// SQL in each, and merges the results by seq. Values are never put into SQL text.
 /// </summary>
-public sealed class StoreQueries(SegmentIndex index)
+public sealed class StoreQueries(SegmentIndex index, TimeProvider time, int keepUpTo)
 {
+    private readonly ListCache<FlagGroups> _flags = new(time, keepUpTo);
+    private readonly ListCache<SessionGroups> _sessions = new(time, keepUpTo);
+
+    public StoreQueries(SegmentIndex index, TimeProvider time) : this(index, time, ListCache<object>.MaxGroups) { }
+
+    public StoreQueries(SegmentIndex index) : this(index, TimeProvider.System) { }
+
+    /// <summary>Lists kept now, both kinds (for tests).</summary>
+    internal int KeptLists => _flags.Count + _sessions.Count;
+
     /// <summary>Rows a page holds when the caller names no size (ADR-014 Decision 1).</summary>
     public const int DefaultPageSize = 50;
     /// <summary>The most rows one page may hold (ADR-008 Decision 4; ADR-014 Decision 1).</summary>
@@ -189,61 +199,147 @@ public sealed class StoreQueries(SegmentIndex index)
     {
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(reviewed);
-        var groups = new Dictionary<(string Rule, string Target, string? Session), FlagAcc>();
-        // As the overview: segments at once, folds that do not depend on order, one lock.
-        var gate = new Lock();
-        await Parallel.ForEachAsync(await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false), ct, async (span, ct) =>
+        var items = await CachedAsync(_flags, filter, static () => new FlagGroups(), FoldFlagsAsync,
+            static g => g.Groups.Count, static g => g.Sorted(), ct).ConfigureAwait(false);
+        // Review state is never cached (ADR-016 Decision 1): audit.db is read on every request.
+        return [.. items.Select(i => reviewed.Contains(i.LastEventId) ? i with { Reviewed = true } : i)];
+    }
+
+    /// <summary>Adds one segment's flagged rows with seq in (<paramref name="above"/>, <paramref name="upTo"/>].</summary>
+    private static async Task FoldFlagsAsync(
+        SqliteConnection conn, Filter filter, long above, long upTo, FlagGroups into, Lock gate, CancellationToken ct)
+    {
+        await foreach (var r in QueryAsync(conn, filter, $"""
+            SELECT seq, event_id, ts_us, tool, session_id, target, flags, outcome, action, detections, count
+            FROM events WHERE {"{filter}"} AND {FlaggedCondition} AND {SeqBetween(above, upTo)}
+            """, null, ct).ConfigureAwait(false))
         {
-            await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
-            await foreach (var r in QueryAsync(conn, filter, $"""
-                SELECT seq, event_id, ts_us, tool, session_id, target, flags, outcome, action, detections, count
-                FROM events WHERE {"{filter}"} AND {FlaggedCondition}
-                """, null, ct).ConfigureAwait(false))
+            if (SeverityRule.Classify(Values.Flags(r.GetString(6)), r.GetString(7), r.GetString(8), r.GetString(9))
+                is not { } c)
             {
-                if (SeverityRule.Classify(Values.Flags(r.GetString(6)), r.GetString(7), r.GetString(8), r.GetString(9))
-                    is not { } c)
+                continue;
+            }
+            var session = r.IsDBNull(4) ? null : r.GetString(4);
+            var key = (c.Rule, r.GetString(5), session);
+            var seq = r.GetInt64(0);
+            var ts = r.GetInt64(2);
+            var tool = r.GetString(3);
+            var count = r.GetInt64(10);
+            var eventId = r.GetString(1);
+            lock (gate)
+            {
+                into.Changed();
+                if (!into.Groups.TryGetValue(key, out var g))
                 {
-                    continue;
+                    g = into.Groups[key] = new FlagAcc(c.Severity, tool, ts);
                 }
-                var session = r.IsDBNull(4) ? null : r.GetString(4);
-                var key = (c.Rule, r.GetString(5), session);
-                var seq = r.GetInt64(0);
-                var ts = r.GetInt64(2);
-                var tool = r.GetString(3);
-                var count = r.GetInt64(10);
-                var eventId = r.GetString(1);
-                lock (gate)
+                g.Rows++;
+                g.Count += count;
+                g.FirstTs = Math.Min(g.FirstTs, ts);
+                g.LastTs = Math.Max(g.LastTs, ts);
+                if (seq > g.LastSeq)
                 {
-                    if (!groups.TryGetValue(key, out var g))
-                    {
-                        g = groups[key] = new FlagAcc(c.Severity, tool, ts);
-                    }
-                    g.Rows++;
-                    g.Count += count;
-                    g.FirstTs = Math.Min(g.FirstTs, ts);
-                    g.LastTs = Math.Max(g.LastTs, ts);
-                    if (seq > g.LastSeq)
-                    {
-                        g.LastSeq = seq;
-                        g.LastEventId = eventId;
-                    }
+                    g.LastSeq = seq;
+                    g.LastEventId = eventId;
                 }
             }
-        }).ConfigureAwait(false);
-        return [.. groups
-            .Select(kv => new FlagItem(kv.Key.Rule, kv.Value.Severity, kv.Key.Target, kv.Key.Session, kv.Value.Tool,
-                kv.Value.Rows, kv.Value.Count, kv.Value.FirstTs, kv.Value.LastTs, kv.Value.LastSeq, kv.Value.LastEventId,
-                reviewed.Contains(kv.Value.LastEventId)))
-            .OrderByDescending(i => i.LastSeq)];
+        }
     }
 
     /// <summary>Sessions with rows in the range, most recently active first.</summary>
     public async Task<IReadOnlyList<SessionSummary>> SessionsAsync(Filter filter, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(filter);
-        var spans = await index.OverlappingAsync(filter.Range, ct).ConfigureAwait(false);
-        return await SummariseAsync(spans, filter, null, ct).ConfigureAwait(false);
+        var sessions = await CachedAsync(_sessions, filter, static () => new SessionGroups(),
+            (conn, f, above, upTo, into, gate, ct) => SummariseIntoAsync(conn, f, null, above, upTo, into, gate, ct),
+            static g => g.Merged.Count, static g => g.Sorted(), ct).ConfigureAwait(false);
+        return sessions;
     }
+
+    /// <summary>Forgets the kept lists (ADR-016 Decision 3: on sign-out).</summary>
+    public void ClearLists()
+    {
+        _flags.Clear();
+        _sessions.Clear();
+    }
+
+    /// <summary>
+    /// <paramref name="filter"/>'s list from <paramref name="cache"/>, brought up to the newest row
+    /// (ADR-016 Decision 1). A new or invalid entry is built from the segments in the range, up
+    /// to the newest seq read before their spans were (so no row below it is missed); a kept one
+    /// folds in only the rows above its seq, all in the newest segment. Equal to a full rebuild
+    /// because rows are append-only and seq only grows (see <see cref="ListCache{TState}"/>).
+    /// </summary>
+    private async Task<TList> CachedAsync<TState, TList>(
+        ListCache<TState> cache, Filter filter, Func<TState> empty,
+        Func<SqliteConnection, Filter, long, long, TState, Lock, CancellationToken, Task> fold,
+        Func<TState, int> size, Func<TState, TList> snapshot, CancellationToken ct) where TState : class
+    {
+        var entry = cache.Get(filter);
+        await entry.Turn.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var kept = await index.ListAsync(ct).ConfigureAwait(false);
+            if (kept.Count == 0)
+            {
+                cache.Drop(filter, entry);
+                return snapshot(empty());
+            }
+            var gate = new Lock();
+            var names = string.Join('/', kept.Select(k => k.Name));
+            if (entry.State is { } state && entry.Segments == names)
+            {
+                var newest = kept[^1];
+                await using var conn = await index.OpenAsync(newest, ct).ConfigureAwait(false);
+                var upTo = await MaxSeqAsync(conn, ct).ConfigureAwait(false);
+                if (upTo > entry.UpTo)
+                {
+                    await fold(conn, filter, entry.UpTo, upTo, state, gate, ct).ConfigureAwait(false);
+                    entry.UpTo = upTo;
+                }
+                // Taken while this entry is held: a later fold never changes what is returned.
+                return snapshot(state);
+            }
+            long top;
+            await using (var conn = await index.OpenAsync(kept[^1], ct).ConfigureAwait(false))
+            {
+                top = await MaxSeqAsync(conn, ct).ConfigureAwait(false);
+            }
+            // Spans read after `top`, so they cover every row at or below it.
+            kept = await index.ListAsync(ct).ConfigureAwait(false);
+            var built = empty();
+            await Parallel.ForEachAsync(kept.Where(k => filter.Range.Overlaps(k.MinTsUs, k.MaxTsUs)), ct, async (span, ct) =>
+            {
+                await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
+                await fold(conn, filter, long.MinValue, top, built, gate, ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+            if (size(built) > cache.KeepUpTo)
+            {
+                cache.Drop(filter, entry);
+            }
+            else
+            {
+                (entry.State, entry.UpTo, entry.Segments) = (built, top, string.Join('/', kept.Select(k => k.Name)));
+            }
+            return snapshot(built);
+        }
+        finally
+        {
+            entry.Turn.Release();
+        }
+    }
+
+    private static async Task<long> MaxSeqAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT coalesce(max(seq), 0) FROM events";
+        return (long)(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) ?? 0L);
+    }
+
+    /// <summary>Seq bounds as SQL; both are numbers the store gave, never request values.</summary>
+    private static string SeqBetween(long above, long upTo) => above == long.MinValue
+        ? FormattableString.Invariant($"seq <= {upTo}")
+        : FormattableString.Invariant($"seq > {above} AND seq <= {upTo}");
 
     /// <summary>
     /// A session and the sessions delegated from it (and from those, recursively), as
@@ -452,36 +548,39 @@ public sealed class StoreQueries(SegmentIndex index)
     private async Task<IReadOnlyList<SessionSummary>> SummariseAsync(
         IReadOnlyList<SegmentSpan> spans, Filter? filter, List<string>? ids, CancellationToken ct)
     {
-        var merged = new Dictionary<string, SessionSummary>(StringComparer.Ordinal);
-        var idClause = ids is null ? "" : $" AND session_id IN ({InList(ids.Count)})";
-        foreach (var span in spans)
+        var groups = new SessionGroups();
+        var gate = new Lock();
+        await Parallel.ForEachAsync(spans, ct, async (span, ct) =>
         {
             await using var conn = await index.OpenAsync(span, ct).ConfigureAwait(false);
-            await foreach (var r in QueryAsync(conn, filter, $"""
-                SELECT session_id, tool, max(parent_session_id), max(project), min(ts_us), max(ts_us), count(*), sum(count), max(seq), sum(source = 'agent' AND category = 'prompt')
-                FROM events WHERE {(filter is null ? "1" : "{filter}")} AND session_id IS NOT NULL{idClause}
-                GROUP BY session_id, tool
-                """, ids, ct).ConfigureAwait(false))
+            await SummariseIntoAsync(conn, filter, ids, long.MinValue, long.MaxValue, groups, gate, ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        return groups.Sorted();
+    }
+
+    /// <summary>
+    /// Adds one segment's sessions (rows with seq in (<paramref name="above"/>, <paramref name="upTo"/>]).
+    /// Every merge is a min, max or sum, so segments may be added in any order.
+    /// </summary>
+    private static async Task SummariseIntoAsync(
+        SqliteConnection conn, Filter? filter, List<string>? ids, long above, long upTo, SessionGroups into, Lock gate,
+        CancellationToken ct)
+    {
+        var idClause = ids is null ? "" : $" AND session_id IN ({InList(ids.Count)})";
+        await foreach (var r in QueryAsync(conn, filter, $"""
+            SELECT session_id, tool, max(parent_session_id), max(project), min(ts_us), max(ts_us), count(*), sum(count), max(seq), sum(source = 'agent' AND category = 'prompt')
+            FROM events WHERE {(filter is null ? "1" : "{filter}")} AND session_id IS NOT NULL AND {SeqBetween(above, upTo)}{idClause}
+            GROUP BY session_id, tool
+            """, ids, ct).ConfigureAwait(false))
+        {
+            var s = new SessionSummary(
+                r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3),
+                r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8), r.GetInt64(9));
+            lock (gate)
             {
-                var s = new SessionSummary(
-                    r.GetString(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.IsDBNull(3) ? null : r.GetString(3),
-                    r.GetInt64(4), r.GetInt64(5), r.GetInt64(6), r.GetInt64(7), r.GetInt64(8), r.GetInt64(9));
-                merged[s.SessionId] = merged.TryGetValue(s.SessionId, out var m)
-                    ? m with
-                    {
-                        ParentSessionId = m.ParentSessionId ?? s.ParentSessionId,
-                        Project = m.Project ?? s.Project,
-                        FirstTsUs = Math.Min(m.FirstTsUs, s.FirstTsUs),
-                        LastTsUs = Math.Max(m.LastTsUs, s.LastTsUs),
-                        Rows = m.Rows + s.Rows,
-                        Events = m.Events + s.Events,
-                        Prompts = m.Prompts + s.Prompts,
-                        LastSeq = Math.Max(m.LastSeq, s.LastSeq),
-                    }
-                    : s;
+                into.Add(s);
             }
         }
-        return [.. merged.Values.OrderByDescending(s => s.LastSeq)];
     }
 
     /// <summary>
@@ -547,6 +646,56 @@ public sealed class StoreQueries(SegmentIndex index)
         public long Denied { get; set; }
         public long Outside { get; set; }
         public int FlaggedOpen { get; set; }
+    }
+
+    /// <summary>Flag groups, and their sorted list until the next change.</summary>
+    private sealed class FlagGroups
+    {
+        private FlagItem[]? _sorted;
+
+        public Dictionary<(string Rule, string Target, string? Session), FlagAcc> Groups { get; } = [];
+
+        public void Changed() => _sorted = null;
+
+        /// <summary>Newest first, unreviewed; a new array after each change, never changed itself.</summary>
+        public FlagItem[] Sorted() => _sorted ??= [.. Groups
+            .Select(kv => new FlagItem(kv.Key.Rule, kv.Value.Severity, kv.Key.Target, kv.Key.Session, kv.Value.Tool,
+                kv.Value.Rows, kv.Value.Count, kv.Value.FirstTs, kv.Value.LastTs, kv.Value.LastSeq, kv.Value.LastEventId,
+                false))
+            .OrderByDescending(i => i.LastSeq)];
+    }
+
+    /// <summary>Sessions merged across segments, and their sorted list until the next change.</summary>
+    private sealed class SessionGroups
+    {
+        private SessionSummary[]? _sorted;
+
+        public Dictionary<string, SessionSummary> Merged { get; } = new(StringComparer.Ordinal);
+
+        public void Add(SessionSummary s)
+        {
+            _sorted = null;
+            Merged[s.SessionId] = Merged.TryGetValue(s.SessionId, out var m)
+                ? m with
+                {
+                    // The larger value, as SQL's max() within a segment: the same in any order.
+                    ParentSessionId = Larger(m.ParentSessionId, s.ParentSessionId),
+                    Project = Larger(m.Project, s.Project),
+                    FirstTsUs = Math.Min(m.FirstTsUs, s.FirstTsUs),
+                    LastTsUs = Math.Max(m.LastTsUs, s.LastTsUs),
+                    Rows = m.Rows + s.Rows,
+                    Events = m.Events + s.Events,
+                    Prompts = m.Prompts + s.Prompts,
+                    LastSeq = Math.Max(m.LastSeq, s.LastSeq),
+                }
+                : s;
+        }
+
+        /// <summary>Most recently active first; a new array after each change, never changed itself.</summary>
+        public SessionSummary[] Sorted() => _sorted ??= [.. Merged.Values.OrderByDescending(s => s.LastSeq)];
+
+        private static string? Larger(string? a, string? b) =>
+            a is null ? b : b is null ? a : string.CompareOrdinal(a, b) >= 0 ? a : b;
     }
 
     private sealed class FlagAcc(Severity severity, string tool, long ts)

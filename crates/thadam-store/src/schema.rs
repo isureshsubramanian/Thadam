@@ -34,6 +34,12 @@ fn in_list<T: WireName>(all: &[T]) -> String {
 
 /// Creates the table in a new file with `encoding`'s schema, or returns the encoding of an
 /// existing file (which keeps its own version).
+///
+/// Hidden coupling (ADR-016): the API's kept Sessions and Flagged lists
+/// (`api/src/Thadam.Store/Queries/ListCache.cs`) fold in only rows above the last `seq` they
+/// read. They are right only while rows are never changed or deleted (the triggers below),
+/// `seq` only grows, and rows leave only with a whole segment. Loosening any of these makes
+/// those lists wrong without an error.
 pub fn apply(conn: &Connection, encoding: Encoding) -> Result<Encoding, StoreError> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version != 0 {

@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Thadam.Api.Security;
 using Thadam.Audit;
+using Thadam.Store.Queries;
 
 namespace Thadam.Api.Endpoints;
 
@@ -63,10 +64,12 @@ public static class SessionEndpoints
     private static readonly string[] NoPassword = ["no_password"];
     private static readonly string[] Wait = ["wait"];
 
-    private static async Task<IResult> SignOutAsync(HttpContext http, AuditLog audit, CancellationToken ct)
+    private static async Task<IResult> SignOutAsync(HttpContext http, AuditLog audit, StoreQueries queries, CancellationToken ct)
     {
         var session = SignInGate.Session(http.User);
         await http.SignOutAsync().ConfigureAwait(false);
+        // Nothing of the lists is kept after the person leaves (ADR-016 Decision 3).
+        queries.ClearLists();
         await audit.SignOutAsync(session, ct).ConfigureAwait(false);
         return Results.NoContent();
     }
