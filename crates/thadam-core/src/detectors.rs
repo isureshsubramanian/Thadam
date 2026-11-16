@@ -69,8 +69,10 @@ impl SecretDetector {
             // Database clients take the password glued to `-p`; `-P` is the port.
             r#"(?:^|[\s/])(?:mysql|mysqldump|mysqladmin|mariadb)\b[^|;&\n]*?[ \t]-p([^\s"'-][^\s"']*)"#,
             r#"(?:^|[\s/])sshpass\b[^|;&\n]*?[ \t]-p[ \t]*([^\s"'-][^\s"']*)"#,
-            // `-u user:password` and `--user user:password`: the part after the colon.
-            r#"(?:^|\s)(?:-u|--user)(?:[ \t]+|=)(?:"[^"\s:]*:([^"\s]+)"|'[^'\s:]*:([^'\s]+)'|[^\s"':]*:([^\s"']+))"#,
+            // curl's `-u user:password` and `--user user:password`: the part after the colon.
+            // Only after `curl`: elsewhere `-u` is UTC (`date -u +%H:%M`) or `uid:gid`
+            // (`docker run -u 1000:1000`).
+            r#"(?:^|[\s/])curl\b[^|;&\n]*?[ \t](?:-u|--user)(?:[ \t]+|=)(?:"[^"\s:]*:([^"\s]+)"|'[^'\s:]*:([^'\s]+)'|[^\s"':]*:([^\s"']+))"#,
             r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]+:([^\s/@]+)@",
             // Well-known provider token prefixes.
             r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}\b|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}\b|hf_[A-Za-z0-9]{30,})",
@@ -338,6 +340,10 @@ mod tests {
                 "curl -u 'mira:madeup-pass' https://example.test",
                 "madeup-pass",
             ),
+            (
+                "/usr/bin/curl -sS -u mira:madeup-pass https://example.test",
+                "madeup-pass",
+            ),
         ] {
             assert_eq!(values(DetectorKind::Secret, text), [secret], "{text}");
         }
@@ -375,6 +381,10 @@ mod tests {
             "sort -u names.txt",
             "git log -u",
             "curl -u mira https://example.test",
+            "date -u +%H:%M:%S",
+            "docker run -u 1000:1000 sample",
+            "docker run --user=1000:1000 sample",
+            "date -u +%H:%M; curl https://example.test",
             "eyJhbGciOiJIUzI1NiJ9 alone",
         ] {
             assert!(values(DetectorKind::Secret, text).is_empty(), "{text}");
