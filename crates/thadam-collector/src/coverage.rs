@@ -102,7 +102,7 @@ pub fn start_gaps(last: Option<Beat>, boot_us: Option<i64>, now_us: i64) -> Vec<
                 last.at_us,
                 now_us,
                 GapReason::NotRunning,
-                Some(detail),
+                Some(detail.to_string()),
             )]
         }
     };
@@ -137,7 +137,7 @@ pub fn dropped(from_us: i64, to_us: i64, source: &'static str, missed: u64) -> O
         from_us,
         to_us,
         reason: GapReason::Dropped,
-        detail: Some(source),
+        detail: Some(source.to_string()),
         missed: Some(missed),
     })
 }
@@ -161,7 +161,7 @@ mod tests {
                 gaps[0].from_us,
                 gaps[0].to_us,
                 gaps[0].reason,
-                gaps[0].detail
+                gaps[0].detail.as_deref()
             ),
             (10 * MIN, 25 * MIN, GapReason::NotRunning, Some("stopped"))
         );
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn a_running_beat_means_it_crashed() {
         let gaps = start_gaps(beat(10 * MIN, false), None, 12 * MIN);
-        assert_eq!(gaps[0].detail, Some("crashed"));
+        assert_eq!(gaps[0].detail.as_deref(), Some("crashed"));
         assert_eq!(gaps[0].reason, GapReason::NotRunning);
     }
 
@@ -237,7 +237,7 @@ mod tests {
         assert!(dropped(0, MIN, "os", 0).is_none());
         let g = dropped(0, MIN, "network", 7).unwrap();
         assert_eq!(
-            (g.reason, g.detail, g.missed),
+            (g.reason, g.detail.as_deref(), g.missed),
             (GapReason::Dropped, Some("network"), Some(7))
         );
     }

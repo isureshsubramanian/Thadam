@@ -117,6 +117,8 @@ pub struct AgentRows {
     /// Nothing waiting closes before this time; `None` after any change, so the next
     /// `advance` looks. Lets the per-event call skip the walk over every session.
     quiet_until: Option<Quiet>,
+    /// Sessions that sent an accepted message, with its time, until `take_heard`.
+    heard: Vec<(Arc<str>, OffsetDateTime)>,
     pub stats: AgentStats,
 }
 
@@ -136,6 +138,7 @@ impl AgentRows {
             sessions: HashMap::new(),
             execs: HashMap::new(),
             quiet_until: None,
+            heard: Vec::new(),
             stats: AgentStats::default(),
         }
     }
@@ -221,6 +224,8 @@ impl AgentRows {
                 continue;
             };
             self.stats.accepted += 1;
+            self.heard
+                .push((Arc::clone(&membership.session_id), h.received));
             let s = Sender {
                 pid: membership.root_pid,
                 membership,
@@ -233,6 +238,12 @@ impl AgentRows {
             rows.extend(self.advance(now));
         }
         rows
+    }
+
+    /// The sessions heard from since the last call, with each message's time (ADR-017
+    /// Decision 4).
+    pub fn take_heard(&mut self) -> Vec<(Arc<str>, OffsetDateTime)> {
+        std::mem::take(&mut self.heard)
     }
 
     /// A command line run in `session` (an OS exec row): a waiting call whose command it

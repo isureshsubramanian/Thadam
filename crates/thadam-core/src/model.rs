@@ -107,6 +107,9 @@ wire_enum!(
         // Hands work to launchd, another app or a scheduler, which runs it outside the tool's
         // process tree, where it is not recorded (ADR-015 Decision 3).
         LaunchOutside => "launch_outside",
+        // Changes one of the tool's own configuration files: its MCP servers, permissions or
+        // hooks (ADR-017). Never also `tool_internal`.
+        ToolConfigChange => "tool_config_change",
     }
 );
 

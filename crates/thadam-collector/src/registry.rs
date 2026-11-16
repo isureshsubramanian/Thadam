@@ -50,6 +50,8 @@ const MAX_UPLOAD_THRESHOLD: i64 = 1 << 40;
 const MAX_DISPLAY_NAME: usize = 64;
 /// Most host patterns per tool (estimate; real lists are a handful).
 const MAX_KNOWN_HOSTS: usize = 1_000;
+/// Most configuration files one tool may list (ADR-017 Decision 1).
+const MAX_CONFIG_FILES: usize = 32;
 /// Retention bounds (ADR-009 Decision 3): ages 7 to 3,650 days, sizes 1 GB to 1 TB, free
 /// floor at least 1 GB. The defaults are the store's `Limits::default()`.
 const MIN_AGE_DAYS: u32 = 7;
@@ -251,6 +253,10 @@ pub struct Tool {
     pub key: String,
     matchers: Vec<Matcher>,
     state_dirs: Vec<PathPattern>,
+    config_files: Vec<PathPattern>,
+    /// Thadam's hook is installed for this tool, so its sessions are expected to send
+    /// hook messages (ADR-017 Decision 4).
+    pub hooks: bool,
     pub network: NetworkPolicy,
 }
 
@@ -258,6 +264,12 @@ impl Tool {
     /// True when `path` is in one of the tool's own state folders.
     pub fn is_state_path(&self, path: &str) -> bool {
         self.state_dirs.iter().any(|p| p.contains(path))
+    }
+
+    /// True when `path` is one of the tool's own configuration files (ADR-017): its MCP
+    /// servers, permissions or hooks. A change to one is flagged, even in a state folder.
+    pub fn is_config_path(&self, path: &str) -> bool {
+        self.config_files.iter().any(|p| p.contains(path))
     }
 
     /// True when the tool can be matched by path, which is weaker than identity.
@@ -312,6 +324,12 @@ impl Registry {
                     .iter()
                     .map(|p| PathPattern::parse(p))
                     .collect(),
+                config_files: entry
+                    .config_files
+                    .iter()
+                    .map(|p| PathPattern::parse(p))
+                    .collect(),
+                hooks: entry.hooks,
                 network: NetworkPolicy {
                     known_hosts: network
                         .known_hosts
@@ -511,6 +529,14 @@ struct ToolEntry {
     #[serde(default)]
     #[garde(inner(custom(path_pattern)))]
     state_dirs: Vec<String>,
+    #[serde(default)]
+    #[garde(length(max = MAX_CONFIG_FILES), inner(custom(path_pattern)))]
+    config_files: Vec<String>,
+    /// True when Thadam's hook is installed for the tool. A tool without one is not
+    /// expected to send hook messages.
+    #[serde(default)]
+    #[garde(skip)]
+    hooks: bool,
     #[serde(default)]
     #[garde(dive)]
     network: Option<NetworkEntry>,
@@ -910,6 +936,18 @@ mod tests {
             (
                 r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}],"state_dirs":["rel/"]}]}"#,
                 "state_dirs",
+            ),
+            (
+                r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}],"config_files":["rel.json"]}]}"#,
+                "config_files",
+            ),
+            (
+                concat!(
+                    r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}],"config_files":["#,
+                    r#""~/c0.json","~/c1.json","~/c2.json","~/c3.json","~/c4.json","~/c5.json","~/c6.json","~/c7.json","~/c8.json","~/c9.json","~/c10.json","~/c11.json","~/c12.json","~/c13.json","~/c14.json","~/c15.json","~/c16.json","~/c17.json","~/c18.json","~/c19.json","~/c20.json","~/c21.json","~/c22.json","~/c23.json","~/c24.json","~/c25.json","~/c26.json","~/c27.json","~/c28.json","~/c29.json","~/c30.json","~/c31.json","~/c32.json""#,
+                    r#"]}]}"#
+                ),
+                "config_files",
             ),
             (
                 r#"{"version":1,"tools":[{"key":"t","match":[{"path":"/x"}]},{"key":"t","match":[{"path":"/y"}]}]}"#,

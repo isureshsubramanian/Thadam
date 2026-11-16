@@ -52,6 +52,7 @@ export function gapWords(g: Gap): string {
     case "before_start": return "Starting after boot";
     case "dropped": return `${num(g.missed ?? 0)} events dropped by ${g.detail === "network" ? "the network extension" : g.detail === "agent" ? "the hook socket" : "macOS"}`;
     case "paused": return `Writing paused: disk low (${num(g.missed ?? 0)} events not written)`;
+    case "hooks_silent": return `Hook messages missing for ${g.detail ?? "a tool"}`;
     default: return words(g.reason);
   }
 }
@@ -66,9 +67,13 @@ export function CoveragePill({ data }: { data: Coverage }) {
   const counts = new Map<string, number>();
   for (const g of data.gaps) counts.set(g.reason, (counts.get(g.reason) ?? 0) + 1);
   const title = [...counts].map(([reason, n]) => `${words(reason)}: ${String(n)}`).join("; ");
-  const droppedOnly = gaps.length > 0 && gaps.every(g => g.reason === "dropped");
+  // Dropped events and silent hooks leave the OS rows recorded: some was missed, not the time.
+  const partlyOnly = gaps.length > 0 && gaps.every(g => g.reason === "dropped" || g.reason === "hooks_silent");
+  const dropped = gaps.filter(g => g.reason === "dropped").reduce((n, g) => n + (g.missed ?? 0), 0);
+  const silent = gaps.filter(g => g.reason === "hooks_silent").length;
+  const partly = [dropped > 0 && `Events dropped: ${num(dropped)}`, silent > 0 && `Hooks silent: ${num(silent)}`].filter(Boolean).join(" · ");
   return <span className={`pill ${gaps.length === 0 ? "ok" : "flag"}`} title={title}>
-    {gaps.length === 0 ? "Watching" : droppedOnly ? `Events dropped: ${num(gaps.reduce((n, g) => n + (g.missed ?? 0), 0))}` : `Not watching: ${minutes(data.notWatchedSeconds)}`}
+    {gaps.length === 0 ? "Watching" : partlyOnly ? partly : `Not watching: ${minutes(data.notWatchedSeconds)}`}
   </span>;
 }
 
@@ -81,9 +86,9 @@ export function HeaderCoverage() {
 type Tone = "off" | "stopped" | "dropped";
 
 const tone = (reason: string): Tone =>
-  reason === "machine_off" || reason === "before_start" ? "off" : reason === "dropped" ? "dropped" : "stopped";
+  reason === "machine_off" || reason === "before_start" ? "off" : reason === "dropped" || reason === "hooks_silent" ? "dropped" : "stopped";
 
-const toneName: Record<Tone, string> = { off: "Mac off or starting", stopped: "Thadam not running", dropped: "Events dropped" };
+const toneName: Record<Tone, string> = { off: "Mac off or starting", stopped: "Thadam not running", dropped: "Events or hook messages missing" };
 
 export interface GapGroup {
   key: string;

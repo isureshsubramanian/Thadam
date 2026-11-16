@@ -465,6 +465,62 @@ fn a_restart_is_recorded_as_a_gap_and_a_logger_jump_as_dropped_events() {
     );
 }
 
+/// A tool session that runs for three minutes and sends no hook message (the stdin source
+/// has no agent socket).
+fn silent_session() -> String {
+    let shell = process(4211, 4100, "/bin/zsh", false);
+    let agent = process(4211, 4100, "/Users/test/.local/bin/2.4.1", true);
+    let exec = format!(
+        r#"{{"target":{agent},"args":["agent"],"env":[],"cwd":{}}}"#,
+        file("/Users/test/projects/demo")
+    );
+    let open = format!(
+        r#"{{"fflag":1,"file":{}}}"#,
+        file("/Users/test/projects/demo/README.md")
+    );
+    let later = |l: String| l.replace("T09:33:", "T09:36:");
+    let lines = [
+        line(1, 0, &shell, "exec", &exec),
+        later(line(2, 0, &agent, "open", &open)),
+        later(line(3, 1, &agent, "exit", r#"{"stat":0}"#)),
+    ];
+    with_closes(&(lines.join("\n") + "\n"))
+}
+
+#[test]
+fn a_tool_with_hooks_that_sends_no_hook_message_is_a_gap() {
+    let silent = |g: &(String, Option<String>, Option<i64>)| g.0 == "hooks_silent";
+
+    // Without "hooks": true the tool is not expected to send any.
+    let dir = TempDir::new("hooks-off");
+    let (out, _) = run_stdin(&dir, &silent_session(), &[]);
+    assert!(out.status.success());
+    assert!(!gaps(&dir).iter().any(silent));
+
+    let dir = TempDir::new("hooks-on");
+    let registry = REGISTRY.replacen(
+        r#""key": "cli_agent","#,
+        r#""key": "cli_agent", "hooks": true,"#,
+        1,
+    );
+    std::fs::write(dir.path("registry.json"), registry).unwrap();
+    let (out, _) = run_stdin(&dir, &silent_session(), &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let found: Vec<_> = gaps(&dir).into_iter().filter(silent).collect();
+    assert_eq!(
+        found,
+        [(
+            "hooks_silent".to_string(),
+            Some("cli_agent".to_string()),
+            None
+        )]
+    );
+}
+
 #[test]
 fn a_killed_collector_is_recorded_as_crashed() {
     let dir = TempDir::new("crash");

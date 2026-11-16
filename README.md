@@ -112,6 +112,8 @@ Find a tool's team id and signing id with `codesign -dv <path to the tool>`.
     { "key": "cli_agent", "display_name": "CLI agent",
       "match": [ { "team_id": "TEAM000001", "signing_id": "com.example.cli-agent" } ],
       "state_dirs": [ "~/.cli-agent/" ],
+      "config_files": [ "~/.cli-agent/settings.json", "~/.cli-agent/mcp.json" ],
+      "hooks": true,
       "network": { "known_hosts": [ "api.example.com" ] } },
     { "key": "local_tool",
       "match": [ { "path": "/usr/local/bin/local-tool" } ] }
@@ -125,6 +127,14 @@ Find a tool's team id and signing id with `codesign -dv <path to the tool>`.
   for unsigned tools.
 - `state_dirs`: the tool's own folders. Activity there is marked as the tool's internal
   activity, not flagged.
+- `config_files` (up to 32): the tool's own configuration, such as its MCP servers,
+  permission rules, memory or instruction files. Any write, create, delete or rename of
+  one is flagged `tool_config_change` (medium) and shown, even inside a state folder.
+  Reads are not flagged. Leave out a file the tool rewrites on every run.
+- `hooks`: set it to `true` when Thadam's hook is installed for the tool. A session that
+  runs for 2 minutes without a single hook message is then recorded as a "Hook messages
+  missing" gap in the coverage timeline. Sessions already running when the collector
+  starts are not checked.
 - `retention`: whole weeks are retired when they pass the age or size limit, or when free
   disk space runs low. The values shown are the defaults. Add `"archive_dir": "/Volumes/…"`
   to move retired weeks there instead of deleting them. Below `min_free_gb`, once only the

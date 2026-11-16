@@ -110,6 +110,13 @@ impl ProcessTree {
         }
     }
 
+    /// The sessions of every process the tree knows now.
+    pub fn session_ids(&self) -> impl Iterator<Item = Arc<str>> + '_ {
+        self.members
+            .values()
+            .map(|e| Arc::clone(&e.membership.session_id))
+    }
+
     /// Updates the tree with one event and reports the membership it implies.
     pub fn observe(&mut self, event: &OsEvent, registry: &Registry) -> Observation {
         let current = self.resolve(&event.process);

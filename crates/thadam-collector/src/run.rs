@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thadam_core::{EventRecord, Redactor};
-use thadam_store::{SegmentStatus, SegmentWriter, StoreError};
+use thadam_store::{Gap, SegmentStatus, SegmentWriter, StoreError};
 use thiserror::Error;
 
 use crate::coverage::{self, Beat, Heartbeat};
@@ -261,9 +261,11 @@ fn read_all<S: EventSource>(mut source: S, tx: &SyncSender<Input>, backlog: &Bac
     }
 }
 
-/// Events the sources reported lost so far, published by the pipeline thread.
+/// Events the sources reported lost so far, and the pipeline's `hooks_silent` gaps (ADR-017
+/// Decision 4), published by the pipeline thread for the writer to record.
 #[derive(Default)]
 struct Lost {
+    hooks_silent: Mutex<Vec<Gap>>,
     os: AtomicU64,
     net: AtomicU64,
     /// Agent items dropped over `AGENT_SLOTS`, counted by the agent listener.
@@ -294,7 +296,8 @@ struct Recorded {
 }
 
 impl Recorded {
-    /// One `dropped` gap per source that lost events since the last call.
+    /// One `dropped` gap per source that lost events since the last call, and the
+    /// `hooks_silent` gaps found since.
     fn record(&mut self, store: &mut SegmentWriter, lost: &Lost) -> Result<(), StoreError> {
         let now = now_us();
         let os = lost.os.load(Ordering::Relaxed);
@@ -314,6 +317,14 @@ impl Recorded {
         .flatten()
         {
             store.record_gap(now, &gap)?;
+        }
+        let silent = lost
+            .hooks_silent
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        for gap in &silent {
+            store.record_gap(now, gap)?;
         }
         *self = Self {
             since_us: now,
@@ -482,7 +493,13 @@ fn process(
         match items.recv_timeout(POLL) {
             Ok(Input::Os(Ok(item))) => {
                 progress.backlog.take();
-                send(pipeline.handle(item), pipeline, redactor, records)?;
+                send(
+                    pipeline.handle(item),
+                    pipeline,
+                    redactor,
+                    records,
+                    progress.lost,
+                )?;
                 progress.publish_lost(&pipeline.stats);
                 if !drop_reported && pipeline.stats.gaps > 0 {
                     drop_reported = true;
@@ -494,16 +511,34 @@ fn process(
                 }
             }
             Ok(Input::Net(item)) => {
-                send(pipeline.handle_flow(item), pipeline, redactor, records)?;
+                send(
+                    pipeline.handle_flow(item),
+                    pipeline,
+                    redactor,
+                    records,
+                    progress.lost,
+                )?;
                 progress.publish_lost(&pipeline.stats);
             }
             Ok(Input::Agent(item)) => {
                 progress.lost.agent_queued.fetch_sub(1, Ordering::AcqRel);
-                send(pipeline.handle_agent(item), pipeline, redactor, records)?;
+                send(
+                    pipeline.handle_agent(item),
+                    pipeline,
+                    redactor,
+                    records,
+                    progress.lost,
+                )?;
             }
             Ok(Input::Os(Err(e))) => {
                 progress.backlog.take();
-                send(pipeline.finish(), pipeline, redactor, records)?;
+                send(
+                    pipeline.finish(),
+                    pipeline,
+                    redactor,
+                    records,
+                    progress.lost,
+                )?;
                 return Err(RunError::Source(e));
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -516,7 +551,13 @@ fn process(
             }
         }
     };
-    send(pipeline.finish(), pipeline, redactor, records)?;
+    send(
+        pipeline.finish(),
+        pipeline,
+        redactor,
+        records,
+        progress.lost,
+    )?;
     progress.publish_lost(&pipeline.stats);
     Ok(ended)
 }
@@ -526,7 +567,14 @@ fn send(
     pipeline: &mut Pipeline,
     redactor: &Redactor,
     records: &SyncSender<EventRecord>,
+    lost: &Lost,
 ) -> Result<(), RunError> {
+    let gaps = pipeline.take_gaps();
+    if !gaps.is_empty()
+        && let Ok(mut g) = lost.hooks_silent.lock()
+    {
+        g.extend(gaps);
+    }
     for event in done {
         match EventRecord::new(event, redactor) {
             Ok(record) => records.send(record).map_err(|_| RunError::Writer)?,
@@ -554,6 +602,9 @@ mod tests {
         assert!(lost.admit_agent());
         assert_eq!(lost.agent.load(Ordering::Relaxed), 2);
         let gap = coverage::dropped(0, 1, "agent", 2).unwrap();
-        assert_eq!((gap.detail, gap.missed), (Some("agent"), Some(2)));
+        assert_eq!(
+            (gap.detail.as_deref(), gap.missed),
+            (Some("agent"), Some(2))
+        );
     }
 }

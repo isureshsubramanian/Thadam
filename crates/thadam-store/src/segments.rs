@@ -337,7 +337,7 @@ impl SegmentWriter {
             CatalogRow {
                 at_us: now_us,
                 reason: Some(gap.reason.wire_name().to_string()),
-                detail: gap.detail.map(str::to_string),
+                detail: gap.detail.clone(),
                 from_us: Some(gap.from_us),
                 to_us: Some(gap.to_us),
                 missed: gap.missed.map(|m| i64::try_from(m).unwrap_or(i64::MAX)),
@@ -560,6 +560,9 @@ pub enum GapReason {
     BeforeStart,
     /// The OS logger or the network extension lost events; detail `os` or `network`.
     Dropped,
+    /// A tool's session had OS activity but sent no hook message (ADR-017 Decision 4);
+    /// detail is the tool's registry key.
+    HooksSilent,
 }
 
 impl GapReason {
@@ -569,6 +572,7 @@ impl GapReason {
             GapReason::MachineOff => "machine_off",
             GapReason::BeforeStart => "before_start",
             GapReason::Dropped => "dropped",
+            GapReason::HooksSilent => "hooks_silent",
         }
     }
 }
@@ -579,7 +583,7 @@ pub struct Gap {
     pub from_us: i64,
     pub to_us: i64,
     pub reason: GapReason,
-    pub detail: Option<&'static str>,
+    pub detail: Option<String>,
     /// Events lost, for `Dropped` only.
     pub missed: Option<u64>,
 }

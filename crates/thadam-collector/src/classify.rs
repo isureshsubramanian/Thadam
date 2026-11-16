@@ -98,7 +98,12 @@ pub fn classify(event: &OsEvent, member: &Membership, registry: &Registry) -> Op
 
     let mut flags = BTreeSet::new();
     for path in &paths {
-        flags.extend(path_flags(path, tool, member, registry));
+        flags.extend(path_flags(path, action, tool, member, registry));
+    }
+    // A rename from a temporary file in the state folder onto a configuration file is a
+    // configuration change, shown by default (ADR-017 Decision 2).
+    if flags.contains(&Flag::ToolConfigChange) {
+        flags.remove(&Flag::ToolInternal);
     }
     let hands_off = match &event.kind {
         EventKind::Exec { target, args, .. } => launches_outside(&target.executable, args),
@@ -174,10 +179,25 @@ fn file(action: Action, path: &str, size: Option<i64>, event: &OsEvent) -> Parts
 }
 
 /// Flags that follow from a path alone.
-pub fn path_flags(path: &str, tool: &Tool, member: &Membership, registry: &Registry) -> Vec<Flag> {
+pub fn path_flags(
+    path: &str,
+    action: Action,
+    tool: &Tool,
+    member: &Membership,
+    registry: &Registry,
+) -> Vec<Flag> {
     let mut flags = Vec::new();
+    let changes = matches!(
+        action,
+        Action::Write | Action::Create | Action::Delete | Action::Rename
+    );
+    // A change to the tool's configuration is not routine state (ADR-017 Decision 2); a read
+    // of it is.
+    let config_change = changes && tool.is_config_path(path);
     let internal = tool.is_state_path(path);
-    if internal {
+    if config_change {
+        flags.push(Flag::ToolConfigChange);
+    } else if internal {
         flags.push(Flag::ToolInternal);
     }
     if is_sensitive(path, registry.sensitive()) {
@@ -230,7 +250,8 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::parse(
-            r#"{"version":1,"tools":[{"key":"cli_agent","match":[{"team_id":"TEAM000001","signing_id":"com.example.cli-agent"}],"state_dirs":["~/.cli-agent/"]}],
+            r#"{"version":1,"tools":[{"key":"cli_agent","match":[{"team_id":"TEAM000001","signing_id":"com.example.cli-agent"}],"state_dirs":["~/.cli-agent/"],
+                 "config_files":["~/.cli-agent/settings.json","~/.cli-agent.json"]}],
                "paths":{"not_outside":["/opt/toolchains/"],"sensitive":["~/.config/sample-cloud/"]}}"#,
         )
         .unwrap()
@@ -484,6 +505,70 @@ mod tests {
     fn tool_state_is_internal_not_outside() {
         assert_eq!(
             flags_for("/Users/test/.cli-agent/history.jsonl", PROJECT),
+            BTreeSet::from([Flag::ToolInternal])
+        );
+    }
+
+    #[test]
+    fn changes_to_tool_config_are_flagged_and_shown() {
+        let r = registry();
+        let flags = |kind: EventKind| classify(&ev(kind), &member(&r, PROJECT), &r).unwrap().flags;
+        let settings = "/Users/test/.cli-agent/settings.json";
+        let change = BTreeSet::from([Flag::ToolConfigChange]);
+        assert_eq!(
+            flags(EventKind::Close {
+                path: settings.into(),
+                modified: true,
+                size: Some(10),
+            }),
+            change
+        );
+        assert_eq!(
+            flags(EventKind::Create {
+                path: settings.into()
+            }),
+            change
+        );
+        assert_eq!(
+            flags(EventKind::Unlink {
+                path: settings.into()
+            }),
+            change
+        );
+        // A refused write open is an attempted change.
+        assert_eq!(
+            flags(EventKind::Open {
+                path: settings.into(),
+                readable: false,
+                writable: true,
+                size: None,
+            }),
+            change
+        );
+        // Written whole to a temporary file in the state folder, then renamed over it.
+        assert_eq!(
+            flags(EventKind::Rename {
+                from: "/Users/test/.cli-agent/settings.json.tmp".into(),
+                to: settings.into(),
+            }),
+            change
+        );
+        // Outside a state folder it is also outside the project.
+        assert_eq!(
+            flags(EventKind::Create {
+                path: "/Users/test/.cli-agent.json".into()
+            }),
+            BTreeSet::from([Flag::OutsideProject, Flag::ToolConfigChange])
+        );
+        // Reading it, and changing other state, stay routine.
+        assert_eq!(
+            flags_for(settings, PROJECT),
+            BTreeSet::from([Flag::ToolInternal])
+        );
+        assert_eq!(
+            flags(EventKind::Create {
+                path: "/Users/test/.cli-agent/history.jsonl".into()
+            }),
             BTreeSet::from([Flag::ToolInternal])
         );
     }

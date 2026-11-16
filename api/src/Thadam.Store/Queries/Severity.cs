@@ -45,6 +45,12 @@ public static class SeverityRule
         {
             return (Severity.Medium, "denied");
         }
+        // The tool's MCP servers, permissions or hooks changed (ADR-017 Decision 3): by the
+        // tool itself as often as by anything else, so medium for all.
+        if (flags.Contains("tool_config_change"))
+        {
+            return (Severity.Medium, "tool_config_change");
+        }
         var outside = flags.Contains("outside_project");
         if (outside && Changes.Contains(action))
         {

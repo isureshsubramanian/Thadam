@@ -8,12 +8,13 @@ use std::fmt;
 use std::sync::Arc;
 
 use thadam_core::{Action, Category, CoreError, DetectorKind, Flag, HOOK_BIN, NewEvent, Redactor};
-use thadam_store::SegmentStatus;
+use thadam_store::{Gap, SegmentStatus};
 use time::Duration;
 
 use crate::agent_rows::{AgentRows, AgentStats};
 use crate::classify::classify;
 use crate::collapse::Collapser;
+use crate::hook_watch::HookWatch;
 use crate::netflow::{Attribution, NetFlows};
 use crate::pairing::{Pairing, Released};
 use crate::registry::Registry;
@@ -142,6 +143,8 @@ pub struct Pipeline {
     /// Holds what the tools report about themselves until the OS stream catches up
     /// (ADR-011).
     agent: AgentRows,
+    /// Tool sessions whose hooks have not spoken (ADR-017 Decision 4).
+    hooks: HookWatch,
     /// Time of the latest OS event handled.
     watermark: Option<time::OffsetDateTime>,
     /// Finds secrets in roll-up candidates' paths, which must stay individual (ADR-005).
@@ -162,6 +165,7 @@ impl Pipeline {
             collapser,
             net: NetFlows::new(settings.window),
             agent: AgentRows::new(HOOK_BIN),
+            hooks: HookWatch::default(),
             watermark: None,
             redactor: Arc::new(Redactor::with_default_detectors()?),
             stats: Stats::default(),
@@ -185,6 +189,12 @@ impl Pipeline {
 
     pub fn seed(&mut self, snapshot: &Snapshot) {
         self.tree.seed(snapshot);
+        self.hooks.skip(self.tree.session_ids());
+    }
+
+    /// The `hooks_silent` gaps found since the last call, for the store.
+    pub fn take_gaps(&mut self) -> Vec<Gap> {
+        self.hooks.take_gaps()
     }
 
     /// Processes one item and returns the records it completed, in completion order.
@@ -237,6 +247,11 @@ impl Pipeline {
             r.flags.remove(&Flag::OutsideProject);
             r.flags.insert(Flag::ToolInternal);
         }
+        if let (Some(r), Some(m)) = (&record, &observation.actor) {
+            let watched = m.parent_session_id.is_none()
+                && self.registry.tool(m.tool).is_some_and(|t| t.hooks);
+            self.hooks.os_row(&m.session_id, &r.tool, watched, event.ts);
+        }
         if let (Some(r), Some(m)) = (&record, &observation.actor)
             && r.category == Category::Command
             && r.action == Action::Exec
@@ -278,6 +293,7 @@ impl Pipeline {
         if let Some(session) = observation.session_ended {
             done.extend(self.collapser.flush_session(&session));
             self.agent.session_ended(&session, event.ts);
+            self.hooks.session_ended(&session, event.ts);
         }
         done.append(&mut net_rows);
         self.stats.records += done.len() as u64;
@@ -352,6 +368,9 @@ impl Pipeline {
             Some(_) => self.agent.release(before, &lookup, &sender),
             None => self.agent.finish(&lookup, &sender),
         };
+        for (session, at) in self.agent.take_heard() {
+            self.hooks.heard(&session, at);
+        }
         if let Some(a) = &mut self.stats.agent {
             *a = self.agent.stats.clone();
         }
@@ -381,6 +400,9 @@ impl Pipeline {
         let tree = &self.tree;
         done.extend(self.net.finish(|o| lookup(tree, o), &self.registry));
         done.extend(self.release_agent(None));
+        if let Some(w) = self.watermark {
+            self.hooks.finish(w);
+        }
         self.stats.flows_kept = self.net.stats.attributed;
         self.stats.records += done.len() as u64;
         done

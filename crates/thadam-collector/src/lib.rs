@@ -8,6 +8,7 @@ pub mod collapse;
 pub mod coverage;
 pub mod credentials;
 pub mod diag;
+pub mod hook_watch;
 pub mod netflow;
 pub mod pairing;
 pub mod peer;

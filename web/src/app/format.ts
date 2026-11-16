@@ -58,6 +58,7 @@ export const ruleTitle: Record<string, string> = {
   launch_outside: "Started outside the tool's process tree",
   large_upload_unknown_host: "Large upload to an unknown host",
   denied: "Refused by the agent or by you",
+  tool_config_change: "Changed the tool's own configuration",
   outside_change: "Changed a file outside the project",
   unknown_host: "Connected to an unknown host",
   large_upload: "Large upload",

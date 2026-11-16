@@ -30,7 +30,8 @@ public sealed record Segment(
 }
 
 /// <summary>A window the collector did not watch (ADR-013 Decision 1): reason <c>not_running</c>,
-/// <c>machine_off</c>, <c>before_start</c> or <c>dropped</c>, kept as written when unknown.</summary>
+/// <c>machine_off</c>, <c>before_start</c>, <c>dropped</c> or <c>hooks_silent</c> (ADR-017), kept as
+/// written when unknown.</summary>
 public sealed record Gap(long FromUs, long ToUs, string Reason, string? Detail, long? Missed);
 
 /// <summary>A time when writing was paused for lack of disk space (ADR-009 Decision 4).</summary>
