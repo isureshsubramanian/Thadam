@@ -11,6 +11,7 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
+use crate::guard::GuardResult;
 use crate::model::{MAX_PATH, MAX_SESSION_ID, MAX_TARGET_INPUT, MAX_TOOL_KEY};
 
 pub const AGENT_WIRE: &str = "thadam.agent.v1";
@@ -60,6 +61,8 @@ pub enum CallKind {
     FileRead,
     /// `text` is the file path, when the tool gave one.
     FileWrite,
+    /// A file search or listing; `text` is the folder (or file) it searches (ADR-018).
+    Search,
     /// Anything else (search, web, subagents, other tools): name only, no `text`.
     Other,
 }
@@ -130,6 +133,10 @@ pub struct AgentMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(skip)]
     pub interrupted: Option<bool>,
+    /// What Thadam's guard did to this call (ADR-018), on a call start only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(skip)]
+    pub guard: Option<GuardResult>,
 }
 
 impl AgentMessage {
@@ -150,6 +157,7 @@ impl AgentMessage {
             subagent: None,
             reason: None,
             interrupted: None,
+            guard: None,
         }
     }
 }

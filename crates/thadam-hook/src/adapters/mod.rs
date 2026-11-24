@@ -24,6 +24,10 @@ pub struct Adapter {
     /// Hook events the adapter handles; `config` subscribes to exactly these.
     pub events: &'static [&'static str],
     pub parse: fn(&Value) -> Option<AgentMessage>,
+    /// The tool's answer that refuses a call about to run, with `reason` shown to the agent
+    /// (ADR-018 Decision 3). `None` when the tool has no confirmed way to refuse: the guard
+    /// then only records `would_block` for it.
+    pub deny: Option<fn(reason: &str) -> String>,
     pub config: HookConfig,
 }
 

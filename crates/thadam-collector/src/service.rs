@@ -11,7 +11,7 @@ pub const BIN_DIR: &str = "/Library/Application Support/Thadam/bin";
 pub const BIN: &str = "/Library/Application Support/Thadam/bin/thadam-collector";
 pub const PLIST: &str = "/Library/LaunchDaemons/com.nerttiyana.thadam.collector.plist";
 pub const LOG: &str = "/Library/Logs/Thadam/collector.log";
-pub const DEFAULT_REGISTRY: &str = "/Library/Application Support/Thadam/registry.json";
+pub const DEFAULT_REGISTRY: &str = thadam_core::guard::REGISTRY;
 pub const DEFAULT_STORE: &str = "/Library/Application Support/Thadam/store";
 
 /// The launchd job (Decision 2). Always kept alive: only `launchctl bootout` stops it.

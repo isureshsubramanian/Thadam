@@ -387,3 +387,153 @@ mod hook_runs {
         }
     }
 }
+
+fn guarded(id: &str, path: &str, result: thadam_core::GuardResult) -> AgentMessage {
+    let mut m = call(AgentKind::CallStart, id, path);
+    m.tool_name = Some("Read".into());
+    m.call_kind = Some(CallKind::FileRead);
+    m.guard = Some(result);
+    m
+}
+
+#[test]
+fn a_call_the_guard_refused_is_one_row_at_once() {
+    let mut r = Run::new();
+    r.send(
+        0,
+        guarded(
+            "c1",
+            "/Users/dev/.ssh/id_rsa",
+            thadam_core::GuardResult::Blocked,
+        ),
+    );
+    let [row] = r.out.as_slice() else {
+        panic!("{:?}", r.out)
+    };
+    assert_eq!(row.outcome, Outcome::DeniedByAgent);
+    assert_eq!(row.target, "/Users/dev/.ssh/id_rsa");
+    assert!(row.flags.contains(&Flag::BlockedByGuard));
+    assert!(row.flags.contains(&Flag::SensitivePath));
+    // A refusal event for the same call, and the turn's end, add nothing.
+    let mut denied = guarded(
+        "c1",
+        "/Users/dev/.ssh/id_rsa",
+        thadam_core::GuardResult::Blocked,
+    );
+    denied.kind = AgentKind::Denied;
+    denied.guard = None;
+    r.send(1, denied)
+        .send(2, msg(AgentKind::TurnEnd))
+        .advance(600);
+    assert_eq!(r.out.len(), 1, "{:?}", r.out);
+    assert_eq!(r.rows.stats.guard_blocked, 1);
+    assert_eq!(r.rows.stats.declines, 0);
+}
+
+#[test]
+fn a_call_the_guard_would_refuse_is_marked_and_still_tracked() {
+    let mut r = Run::new();
+    r.send(
+        0,
+        guarded(
+            "c2",
+            "/Users/dev/.ssh/config",
+            thadam_core::GuardResult::WouldBlock,
+        ),
+    );
+    let mut done = msg(AgentKind::CallDone);
+    done.call = Some("c2".into());
+    r.send(1, done).advance(600);
+    let [row] = r.out.as_slice() else {
+        panic!("{:?}", r.out)
+    };
+    assert_eq!(row.outcome, Outcome::Allowed);
+    assert!(row.flags.contains(&Flag::WouldBlock));
+    assert!(row.flags.contains(&Flag::SensitivePath));
+    assert_eq!(r.rows.stats.guard_would_block, 1);
+}
+
+#[test]
+fn a_guard_error_is_counted_and_the_call_is_handled_as_usual() {
+    let mut r = Run::new();
+    r.send(
+        0,
+        guarded(
+            "c3",
+            "/Users/dev/.ssh/config",
+            thadam_core::GuardResult::Error,
+        ),
+    );
+    assert!(r.out.is_empty());
+    assert_eq!(r.rows.stats.guard_errors, 1);
+}
+
+#[test]
+fn a_would_block_call_the_user_declined_is_one_declined_row() {
+    let mut r = Run::new();
+    let mut ask = guarded(
+        "c4",
+        "/Users/dev/.ssh/config",
+        thadam_core::GuardResult::WouldBlock,
+    );
+    ask.kind = AgentKind::PermissionRequest;
+    ask.call = None;
+    ask.guard = None;
+    r.send(0, ask)
+        .send(
+            0,
+            guarded(
+                "c4",
+                "/Users/dev/.ssh/config",
+                thadam_core::GuardResult::WouldBlock,
+            ),
+        )
+        .send(5, msg(AgentKind::Prompt))
+        .advance(600);
+    let declined: Vec<_> = r
+        .out
+        .iter()
+        .filter(|row| row.category != thadam_core::Category::Prompt)
+        .collect();
+    let [row] = declined.as_slice() else {
+        panic!("{:?}", r.out)
+    };
+    assert_eq!(row.outcome, Outcome::DeniedByUser);
+    assert!(row.flags.contains(&Flag::WouldBlock));
+    assert!(
+        !r.out
+            .iter()
+            .any(|row| row.outcome == Outcome::Allowed && row.flags.contains(&Flag::WouldBlock))
+    );
+}
+
+#[test]
+fn a_repeated_blocked_call_is_one_row_and_missing_ids_never_match() {
+    let mut r = Run::new();
+    let blocked = guarded(
+        "c5",
+        "/Users/dev/.ssh/id_rsa",
+        thadam_core::GuardResult::Blocked,
+    );
+    r.send(0, blocked.clone()).send(1, blocked);
+    assert_eq!(r.out.len(), 1, "{:?}", r.out);
+    assert_eq!(r.rows.stats.guard_blocked, 1);
+
+    // A blocked call with no call ID, turn or hash must not swallow a later refusal.
+    let mut r = Run::new();
+    let mut anon = guarded(
+        "",
+        "/Users/dev/.ssh/id_rsa",
+        thadam_core::GuardResult::Blocked,
+    );
+    anon.turn = None;
+    anon.input_hash = None;
+    r.send(0, anon);
+    let mut denied = msg(AgentKind::Denied);
+    denied.turn = None;
+    denied.tool_name = Some("Shell".into());
+    denied.call_kind = Some(CallKind::Shell);
+    denied.text = Some("rm -rf build".into());
+    r.send(1, denied);
+    assert_eq!(r.out.len(), 2, "{:?}", r.out);
+}

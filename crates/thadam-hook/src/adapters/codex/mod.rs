@@ -31,6 +31,8 @@ pub const ADAPTER: Adapter = Adapter {
     key: KEY,
     events: EVENTS,
     parse,
+    // Not confirmed that a managed Codex hook can refuse a call (ADR-018 probe).
+    deny: None,
     config: HookConfig {
         path: config::PATH,
         render: config::render,

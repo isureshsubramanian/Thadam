@@ -217,7 +217,13 @@ mod tests {
                         command,
                         format!("'{}' --tool {}", bin.replace('\'', "'\\''"), adapter.key)
                     );
-                    assert_eq!(value["hooks"][event][0]["hooks"][0]["async"], true);
+                    // The guard's event waits for the hook (ADR-018); the rest don't.
+                    let wanted = if *event == "PreToolUse" {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Bool(true)
+                    };
+                    assert_eq!(value["hooks"][event][0]["hooks"][0]["async"], wanted);
                     assert!(
                         value["hooks"][event][0]["hooks"][0]
                             .get("statusMessage")

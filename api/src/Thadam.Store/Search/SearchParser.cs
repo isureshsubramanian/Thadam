@@ -63,7 +63,8 @@ public static partial class SearchParser
         "allowed", "denied_by_agent", "denied_by_user", "denied_by_os", "never_ran", "failed");
     public static readonly IReadOnlySet<string> FlagNames = Set(
         "outside_project", "sensitive_path", "secret_pattern", "unknown_host", "large_upload", "tool_internal", "internal",
-        "rolled_up", "unconfirmed", "continued", "launch_outside", "tool_config_change");
+        "rolled_up", "unconfirmed", "continued", "launch_outside", "tool_config_change", "blocked_by_guard",
+        "would_block");
     private static readonly string[] Denied = ["denied_by_agent", "denied_by_user", "denied_by_os", "never_ran"];
 
     [GeneratedRegex(@"^(\d{1,4})([dh])$", RegexOptions.CultureInvariant)]

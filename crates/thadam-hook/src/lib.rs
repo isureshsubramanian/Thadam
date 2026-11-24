@@ -1,9 +1,11 @@
 //! `thadam-hook`: run by an AI tool on each hook event (ADR-011 Decision 2). Reads the
 //! event from stdin, keeps only what Decision 4 allows, and sends one `thadam.agent.v1`
-//! line to the collector. It never writes to stdout or stderr and always exits 0, so it
-//! cannot block, deny or change what the tool does.
+//! line to the collector. It always exits 0 and writes nothing to stderr. It writes to
+//! stdout only to refuse a call that Thadam's guard blocks (ADR-018); with the guard off
+//! for the tool, it cannot block, deny or change what the tool does.
 
 pub mod adapters;
+pub mod guard;
 pub mod install;
 
 use std::io::{Read, Write};
@@ -20,17 +22,73 @@ pub const SEND_BUDGET: Duration = Duration::from_millis(200);
 /// estimate; the largest output seen in the probe was 29,876 bytes.
 pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
-/// Maps one hook payload to the line to send, or `None` when there is nothing to send
-/// (unknown tool or event, not JSON, too large, or a field out of range).
-pub fn handle(tool: &str, payload: &[u8]) -> Option<String> {
+/// What the hook does with one payload.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reply {
+    /// The tool's refusal, printed to stdout, when the guard blocks the call.
+    pub stdout: Option<String>,
+    /// The line for the collector.
+    pub line: Option<String>,
+}
+
+/// Maps one hook payload to the reply. Nothing at all for an unknown tool or event, not
+/// JSON, too large, or a field out of range. `home` expands `~/` in the call's paths.
+pub fn run(
+    tool: &str,
+    payload: &[u8],
+    registry: &dyn Fn() -> guard::Registry,
+    home: Option<&str>,
+    resolve: &mut dyn FnMut(&str) -> guard::Resolved,
+) -> Reply {
     if payload.len() > MAX_PAYLOAD {
-        return None;
+        return Reply::default();
     }
-    let adapter = adapters::by_key(tool)?;
-    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    let message = (adapter.parse)(&value)?;
-    garde::Validate::validate(&message).ok()?;
-    serde_json::to_string(&message).ok()
+    let Some(adapter) = adapters::by_key(tool) else {
+        return Reply::default();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return Reply::default();
+    };
+    let Some(mut message) = (adapter.parse)(&value) else {
+        return Reply::default();
+    };
+    // The guard decides before validation, so a call too large to record is still refused
+    // (review D); such a call then has no line for the collector.
+    let cwd = value.get("cwd").and_then(serde_json::Value::as_str);
+    let mut stdout = None;
+    if let Some(d) = guard::check(
+        &message,
+        cwd,
+        home,
+        registry,
+        adapter.deny.is_some(),
+        resolve,
+    ) {
+        if d.result == thadam_core::GuardResult::Blocked
+            && let (Some(deny), Some(path)) = (adapter.deny, d.path.as_deref())
+        {
+            stdout = Some(deny(&guard::reason(path)));
+        }
+        message.guard = Some(d.result);
+    }
+    let line = garde::Validate::validate(&message)
+        .ok()
+        .and_then(|()| serde_json::to_string(&message).ok());
+    Reply { stdout, line }
+}
+
+/// The collector line for one payload, without the guard (the line `run` sends when the
+/// guard is off).
+pub fn handle(tool: &str, payload: &[u8]) -> Option<String> {
+    let mut as_written = |p: &str| guard::Resolved::Path(p.to_string());
+    run(
+        tool,
+        payload,
+        &|| guard::Registry::Missing,
+        None,
+        &mut as_written,
+    )
+    .line
 }
 
 /// Reads at most one byte more than the limit, so an oversized payload is seen as such.

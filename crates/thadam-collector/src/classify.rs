@@ -4,9 +4,10 @@ use std::collections::BTreeSet;
 
 use thadam_core::{Action, Category, ExecObservation, Flag, NewEvent, Outcome, Source};
 
-use crate::registry::{PathPattern, Registry, Tool, home_relative, under};
+use crate::registry::{Registry, Tool, home_relative, under};
 use crate::source::{EventKind, OsEvent};
 use crate::tree::Membership;
+use thadam_core::paths::is_sensitive;
 
 /// Prefixes never flagged as outside the project: the OS, temporary folders and devices.
 /// Recorded, just not flagged. An estimate of what reads as noise, to tune by replay.
@@ -21,11 +22,6 @@ const NOT_OUTSIDE: &[&str] = &[
     "/private/tmp/",
     "/private/var/folders/",
 ];
-
-/// Folders under a home folder that hold credentials.
-const SENSITIVE_HOME_DIRS: &[&str] = &[".ssh", ".gnupg", "Library/Keychains", ".netrc"];
-const SENSITIVE_EXTENSIONS: &[&str] = &["pem", "p12", "key"];
-const SENSITIVE_NAME_PREFIXES: &[&str] = &["id_rsa", "id_ed25519"];
 
 /// `launchctl` subcommands that start a job outside the caller's process tree (ADR-015
 /// Decision 3). `list`, `print` and the like only read.
@@ -219,26 +215,6 @@ pub fn path_flags(
 /// is not exempt.
 fn is_system_path(path: &str) -> bool {
     !under(path, "/usr/local/") && NOT_OUTSIDE.iter().any(|p| under(path, p))
-}
-
-fn is_sensitive(path: &str, extra: &[PathPattern]) -> bool {
-    if extra.iter().any(|p| p.contains(path)) {
-        return true;
-    }
-    if home_relative(path).is_some_and(|rel| SENSITIVE_HOME_DIRS.iter().any(|d| under(rel, d))) {
-        return true;
-    }
-    let name = path.rsplit('/').next().unwrap_or(path);
-    if name == ".env" || name.starts_with(".env.") {
-        return true;
-    }
-    if SENSITIVE_NAME_PREFIXES.iter().any(|p| name.starts_with(p)) {
-        return true;
-    }
-    match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => SENSITIVE_EXTENSIONS.contains(&ext),
-        _ => false,
-    }
 }
 
 #[cfg(test)]

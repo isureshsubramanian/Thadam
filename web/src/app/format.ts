@@ -54,6 +54,8 @@ export const words = (wire: string): string => wire.replaceAll("_", " ");
 /** What each flag rule means, as the queue's heading (ADR-008 Decision 7). */
 export const ruleTitle: Record<string, string> = {
   secret: "Secret or sensitive data detected",
+  blocked_by_guard: "Blocked by Thadam guard",
+  would_block: "Would be blocked by Thadam guard (monitor)",
   sensitive_path: "Sensitive path accessed",
   launch_outside: "Started outside the tool's process tree",
   large_upload_unknown_host: "Large upload to an unknown host",

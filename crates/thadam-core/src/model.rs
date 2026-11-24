@@ -110,6 +110,11 @@ wire_enum!(
         // Changes one of the tool's own configuration files: its MCP servers, permissions or
         // hooks (ADR-017). Never also `tool_internal`.
         ToolConfigChange => "tool_config_change",
+        // Thadam's guard refused the call (ADR-018). Carried with outcome `denied_by_agent`:
+        // the store's outcome list is fixed per segment, flags are free text.
+        BlockedByGuard => "blocked_by_guard",
+        // The guard matched in monitor mode and let the call run (ADR-018).
+        WouldBlock => "would_block",
     }
 );
 

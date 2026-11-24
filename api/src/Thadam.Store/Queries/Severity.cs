@@ -26,6 +26,16 @@ public static class SeverityRule
         {
             return (Severity.High, "secret");
         }
+        // Thadam's guard matched a protected path (ADR-018): as high as the access itself,
+        // under its own heading so a refused call is not read as an access that happened.
+        if (flags.Contains("blocked_by_guard"))
+        {
+            return (Severity.High, "blocked_by_guard");
+        }
+        if (flags.Contains("would_block"))
+        {
+            return (Severity.High, "would_block");
+        }
         if (flags.Contains("sensitive_path"))
         {
             return (Severity.High, "sensitive_path");

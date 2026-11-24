@@ -5,6 +5,11 @@ use serde_json::{Map, Value, json};
 
 pub const PATH: &str = "/Library/Application Support/ClaudeCode/managed-settings.d/thadam.json";
 
+/// Seconds the tool waits for the guard's answer (ADR-018 Decision 3, estimate: reading the
+/// registry and matching take milliseconds; the margin covers a cold start). The tool lets
+/// the call run if the hook takes longer.
+const GUARD_TIMEOUT_S: u64 = 2;
+
 fn command(hook_bin: &str) -> String {
     thadam_core::hook_command(hook_bin, super::KEY)
 }
@@ -14,9 +19,14 @@ pub fn render(hook_bin: &str) -> String {
     let hooks: Map<String, Value> = super::EVENTS
         .iter()
         .map(|event| {
-            let entry = json!([{ "hooks": [{
-                "type": "command", "command": command, "async": true, "timeout": 5
-            }] }]);
+            // The guard answers before a call runs, so that one event waits for the hook
+            // (ADR-018 Decision 3); every other event stays asynchronous.
+            let hook = if *event == "PreToolUse" {
+                json!({ "type": "command", "command": command, "timeout": GUARD_TIMEOUT_S })
+            } else {
+                json!({ "type": "command", "command": command, "async": true, "timeout": 5 })
+            };
+            let entry = json!([{ "hooks": [hook] }]);
             ((*event).to_string(), entry)
         })
         .collect();

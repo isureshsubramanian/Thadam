@@ -8,12 +8,18 @@
 //! - A call that never finished becomes a row when its turn ends: `denied_by_user` if the
 //!   tool asked the user to approve it, else `never_ran`. Neither tool reports the user's
 //!   answer, so both carry `unconfirmed`.
+//! - A call Thadam's guard refused becomes a row at once: `denied_by_agent` with
+//!   `blocked_by_guard` (ADR-018; the outcome list is fixed per segment, flags are not). A
+//!   call it would have refused (monitor) becomes a row with `would_block` once its outcome is
+//!   known: ran, failed, declined or never ran. Both carry `sensitive_path`: that is what the
+//!   guard matches.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use thadam_core::{
-    Action, AgentKind, AgentLink, AgentMessage, CallKind, Category, Flag, NewEvent, Outcome, Source,
+    Action, AgentKind, AgentLink, AgentMessage, CallKind, Category, Flag, GuardResult, NewEvent,
+    Outcome, Source,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -38,6 +44,9 @@ pub const HELD_CAP: usize = 10_000;
 /// oldest is closed early.
 const CALLS_CAP: usize = 256;
 const ASKS_CAP: usize = 64;
+/// Refused calls remembered per tool session, so a later refusal event for the same call
+/// does not add a second row (estimate, like `ASKS_CAP`).
+const BLOCKED_CAP: usize = 64;
 /// Recent command lines kept per session, to tell a call that ran from one that did not
 /// when the tool reports no result for failures (amendment 1).
 const EXECS_CAP: usize = 64;
@@ -68,6 +77,11 @@ pub struct AgentStats {
     pub prompts: u64,
     pub declines: u64,
     pub never_ran: u64,
+    /// Calls the guard refused, or would have refused (ADR-018).
+    pub guard_blocked: u64,
+    pub guard_would_block: u64,
+    /// Calls the guard could not check (registry unreadable); they ran.
+    pub guard_errors: u64,
 }
 
 struct Held {
@@ -86,6 +100,9 @@ struct Call {
     text: Option<String>,
     tool_name: Option<String>,
     asked: bool,
+    /// The guard would have refused it (monitor): its row, written once the outcome is
+    /// known, carries `would_block`.
+    would_block: bool,
     close_at: OffsetDateTime,
 }
 
@@ -103,6 +120,8 @@ struct State {
     transcript: Option<String>,
     calls: Vec<Call>,
     asks: VecDeque<Ask>,
+    /// Calls the guard refused: (call ID, turn, input hash).
+    blocked: VecDeque<(Option<String>, Option<String>, Option<String>)>,
     ended: bool,
 }
 
@@ -340,6 +359,7 @@ impl AgentRows {
             transcript: None,
             calls: Vec::new(),
             asks: VecDeque::new(),
+            blocked: VecDeque::new(),
             ended: false,
         });
         state.sender = sender;
@@ -386,6 +406,43 @@ impl AgentRows {
                 if m.call.is_some() && state.calls.iter().any(|c| c.id == m.call) {
                     return rows;
                 }
+                match m.guard {
+                    Some(GuardResult::Blocked) => {
+                        if state.blocked.iter().any(|b| same_call(b, m)) {
+                            return rows;
+                        }
+                        self.stats.guard_blocked += 1;
+                        if state.blocked.len() >= BLOCKED_CAP {
+                            state.blocked.pop_front();
+                        }
+                        state.blocked.push_back((
+                            m.call.clone(),
+                            m.turn.clone(),
+                            m.input_hash.clone(),
+                        ));
+                        let (category, action, target) = what(
+                            m.call_kind.unwrap_or(CallKind::Other),
+                            m.text.as_deref(),
+                            m.tool_name.as_deref(),
+                        );
+                        let mut r = row(
+                            state,
+                            at,
+                            category,
+                            action,
+                            target,
+                            Outcome::DeniedByAgent,
+                            state.transcript.is_none(),
+                        );
+                        guard_flags(&mut r, Flag::BlockedByGuard);
+                        rows.push(r);
+                        // Refused before it ran: there is no call to wait for.
+                        return rows;
+                    }
+                    Some(GuardResult::WouldBlock) => self.stats.guard_would_block += 1,
+                    Some(GuardResult::Error) => self.stats.guard_errors += 1,
+                    None => {}
+                }
                 let asked = match state
                     .asks
                     .iter()
@@ -406,12 +463,16 @@ impl AgentRows {
                     text: m.text.clone(),
                     tool_name: m.tool_name.clone(),
                     asked,
+                    would_block: m.guard == Some(GuardResult::WouldBlock),
                     close_at: at + CALL_TIMEOUT,
                 };
                 // It may already have run: the hook is asynchronous, so the OS can report the
                 // command before the tool's own event arrives.
                 let execs = self.execs.get(&key.0);
                 if execs.is_some_and(|e| e.iter().any(|(ts, t)| ran(&call, *ts, t))) {
+                    if call.would_block {
+                        rows.push(ran_row(state, &call, Outcome::Allowed));
+                    }
                     return rows;
                 }
                 if state.calls.len() >= CALLS_CAP {
@@ -423,9 +484,21 @@ impl AgentRows {
             AgentKind::CallDone | AgentKind::CallFailed => {
                 // A failure fires both events in one tool (amendment 1): the first removes
                 // the call, the second finds nothing.
-                remove_call(&mut state.calls, m);
+                if let Some(call) = remove_call(&mut state.calls, m)
+                    && call.would_block
+                {
+                    let outcome = if m.kind == AgentKind::CallFailed {
+                        Outcome::Failed
+                    } else {
+                        Outcome::Allowed
+                    };
+                    rows.push(ran_row(state, &call, outcome));
+                }
             }
             AgentKind::Denied => {
+                if state.blocked.iter().any(|b| same_call(b, m)) {
+                    return rows;
+                }
                 let call = remove_call(&mut state.calls, m);
                 self.stats.declines += 1;
                 let (category, action, target) = match &call {
@@ -437,7 +510,7 @@ impl AgentRows {
                     ),
                 };
                 let at = call.as_ref().map_or(at, |c| c.started);
-                rows.push(row(
+                let mut r = row(
                     state,
                     at,
                     category,
@@ -445,7 +518,11 @@ impl AgentRows {
                     target,
                     Outcome::DeniedByAgent,
                     state.transcript.is_none(),
-                ));
+                );
+                if call.as_ref().is_some_and(|c| c.would_block) {
+                    guard_flags(&mut r, Flag::WouldBlock);
+                }
+                rows.push(r);
             }
             AgentKind::TurnEnd => {
                 for c in &mut state.calls {
@@ -509,7 +586,50 @@ fn what(kind: CallKind, text: Option<&str>, tool_name: Option<&str>) -> (Categor
             Action::Write,
             text.map_or_else(name, str::to_string),
         ),
+        CallKind::Search => (
+            Category::File,
+            Action::Read,
+            text.map_or_else(name, str::to_string),
+        ),
         CallKind::Other => (Category::Command, Action::Exec, name()),
+    }
+}
+
+/// Marks a row the guard matched: what it did, and why (it matches sensitive paths only).
+fn guard_flags(r: &mut NewEvent, flag: Flag) {
+    r.flags.insert(flag);
+    r.flags.insert(Flag::SensitivePath);
+}
+
+/// The row for a call the guard would have refused, once it is known to have run.
+fn ran_row(state: &State, call: &Call, outcome: Outcome) -> NewEvent {
+    let (category, action, target) =
+        what(call.kind, call.text.as_deref(), call.tool_name.as_deref());
+    let mut r = row(
+        state,
+        call.started,
+        category,
+        action,
+        target,
+        outcome,
+        state.transcript.is_none(),
+    );
+    guard_flags(&mut r, Flag::WouldBlock);
+    r
+}
+
+/// Whether a refused call (call ID, turn, input hash) is message `m`'s call. Without call IDs
+/// both turn and input hash must be known and equal: a missing value never matches.
+fn same_call(blocked: &(Option<String>, Option<String>, Option<String>), m: &AgentMessage) -> bool {
+    match (&blocked.0, &m.call) {
+        (Some(id), Some(call)) => id == call,
+        (None, None) => {
+            blocked.1.is_some()
+                && blocked.2.is_some()
+                && blocked.1 == m.turn
+                && blocked.2 == m.input_hash
+        }
+        _ => false,
     }
 }
 
@@ -534,6 +654,9 @@ fn closed_row(stats: &mut AgentStats, state: &State, call: &Call) -> NewEvent {
         state.transcript.is_none(),
     );
     r.flags.insert(Flag::Unconfirmed);
+    if call.would_block {
+        guard_flags(&mut r, Flag::WouldBlock);
+    }
     r
 }
 

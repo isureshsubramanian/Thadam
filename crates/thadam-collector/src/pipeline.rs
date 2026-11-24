@@ -91,6 +91,13 @@ impl fmt::Display for Stats {
                 " agent_msgs={} agent_kept={} agent_refused={} agent_prompts={} agent_declines={} agent_never_ran={}",
                 a.messages, a.accepted, a.refused, a.prompts, a.declines, a.never_ran
             )?;
+            if a.guard_blocked + a.guard_would_block + a.guard_errors > 0 {
+                write!(
+                    f,
+                    " guard_blocked={} guard_would_block={} guard_errors={}",
+                    a.guard_blocked, a.guard_would_block, a.guard_errors
+                )?;
+            }
             if a.overflow > 0 {
                 write!(f, " agent_overflow={}", a.overflow)?;
             }

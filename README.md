@@ -5,7 +5,8 @@ your Mac (the files they open, the commands they run, the hosts they connect to,
 prompts they are given) and shows it in a local web dashboard.
 
 Everything stays on your Mac. The record is append-only and hash-chained, so a changed or
-deleted row is detected. Thadam observes only: it never blocks a tool.
+deleted row is detected. Thadam observes only, unless you turn on its guard for a tool
+(see [The guard](#the-guard)).
 
 Status: early development (0.1.x). Apple silicon Macs only.
 
@@ -114,7 +115,8 @@ Find a tool's team id and signing id with `codesign -dv <path to the tool>`.
       "state_dirs": [ "~/.cli-agent/" ],
       "config_files": [ "~/.cli-agent/settings.json", "~/.cli-agent/mcp.json" ],
       "hooks": true,
-      "network": { "known_hosts": [ "api.example.com" ] } },
+      "network": { "known_hosts": [ "api.example.com" ] },
+      "guard": { "files": "monitor" } },
     { "key": "local_tool",
       "match": [ { "path": "/usr/local/bin/local-tool" } ] }
   ],
@@ -135,12 +137,38 @@ Find a tool's team id and signing id with `codesign -dv <path to the tool>`.
   runs for 2 minutes without a single hook message is then recorded as a "Hook messages
   missing" gap in the coverage timeline. Sessions already running when the collector
   starts are not checked.
+- `guard`: see [The guard](#the-guard). Leave it out to keep the tool observe-only.
 - `retention`: whole weeks are retired when they pass the age or size limit, or when free
   disk space runs low. The values shown are the defaults. Add `"archive_dir": "/Volumes/…"`
   to move retired weeks there instead of deleting them. Below `min_free_gb`, once only the
   current week is left, the collector stops writing, counts what it skips, and records the
   gap. Every retirement and gap is recorded in the catalog and shown in the dashboard's
   coverage timeline.
+
+### The guard
+
+The guard is off for every tool unless the registry turns it on. With `"guard": { "files":
+"monitor" }`, Thadam checks each file and shell call the tool is about to make, through its
+hook, against the sensitive paths it already flags (`~/.ssh`, `~/.gnupg`, keychains, `.env`
+files, `*.pem`, `*.key`, private SSH keys, and anything in `paths.sensitive`):
+
+- `monitor`: a match is recorded as "Would be blocked by Thadam guard" and the call runs.
+  Use this first, for a week or so, to see what enforce would stop.
+- `enforce`: a match is refused before it runs, and the agent is told why. Only tools whose
+  hook can refuse a call support this; for the others it acts as `monitor`.
+
+What it does not stop, so it is not mistaken for a sandbox:
+
+- A path built at run time (a script, a variable, an encoded string) is not seen. The read
+  itself is still recorded and flagged from the OS events.
+- Searches are checked at the folder they start from. A search of a parent folder (for
+  example the whole project) can still read protected files below it.
+- Tools that run no hooks are not guarded.
+- Changing the registry needs an admin password. If your `sudo` is still cached in the
+  agent's terminal, the agent could change it too.
+
+Paths on network, mounted or synced locations (`/Volumes`, `/Network`, iCloud Drive and other
+cloud folders) are matched by their text only: the guard never opens or resolves them.
 
 ## Build from source
 

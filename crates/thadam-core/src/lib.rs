@@ -11,7 +11,9 @@ pub mod detectors;
 pub mod encode;
 pub mod error;
 pub mod exec;
+pub mod guard;
 pub mod model;
+pub mod paths;
 
 pub use agent::{
     AGENT_SOCKET, AGENT_WIRE, AgentKind, AgentMessage, CallKind, HOOK_BIN, Reason, hook_command,
@@ -27,6 +29,7 @@ pub use detect::{Detections, Detector, DetectorKind, Redacted, Redactor};
 pub use encode::{CanonicalRow, Encoding, encode};
 pub use error::CoreError;
 pub use exec::ExecObservation;
+pub use guard::{GuardMode, GuardResult, GuardSection, HookGuard};
 pub use model::{
     Action, AgentLink, Category, EventRecord, Flag, NewEvent, Outcome, Source, WireName,
 };

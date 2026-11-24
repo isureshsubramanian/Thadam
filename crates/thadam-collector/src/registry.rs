@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use garde::Validate;
 use serde::Deserialize;
+use thadam_core::GuardSection;
 use thadam_core::model::MAX_TOOL_KEY;
 use thadam_store::Limits;
 use thiserror::Error;
@@ -82,73 +83,8 @@ impl ToolId {
     }
 }
 
-/// A path prefix. `~/` stands for any user's home folder, because the collector runs as
-/// root and serves every user on the Mac.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathPattern {
-    Absolute(String),
-    /// The part after `~/`.
-    Home(String),
-}
-
-impl PathPattern {
-    fn parse(text: &str) -> Self {
-        match text.strip_prefix("~/") {
-            Some(rest) => PathPattern::Home(rest.to_string()),
-            None => PathPattern::Absolute(text.to_string()),
-        }
-    }
-
-    /// The part of `path` the pattern matched, without a trailing `/`, when `path` lies
-    /// under it. For `~/x/` and `/Users/dev/x/y` that is `/Users/dev/x`.
-    pub fn matched_prefix<'p>(&self, path: &'p str) -> Option<&'p str> {
-        if !self.contains(path) {
-            return None;
-        }
-        let len = match self {
-            PathPattern::Absolute(prefix) => prefix.trim_end_matches('/').len(),
-            PathPattern::Home(rest) => {
-                let relative = home_relative(path)?;
-                (path.len() - relative.len()) + rest.trim_end_matches('/').len()
-            }
-        };
-        path.get(..len)
-    }
-
-    /// True when `path` is the pattern itself or lies under it.
-    pub fn contains(&self, path: &str) -> bool {
-        match self {
-            PathPattern::Absolute(prefix) => under(path, prefix),
-            PathPattern::Home(rest) => match home_relative(path) {
-                Some(relative) => rest.is_empty() || under(relative, rest),
-                None => false,
-            },
-        }
-    }
-}
-
-/// `path` equals `prefix` or lies below it. A prefix ending in `/` names a folder.
-pub fn under(path: &str, prefix: &str) -> bool {
-    let trimmed = prefix.strip_suffix('/').unwrap_or(prefix);
-    if trimmed.is_empty() {
-        return path.starts_with('/');
-    }
-    match path.strip_prefix(trimmed) {
-        Some("") => true,
-        Some(rest) => rest.starts_with('/'),
-        None => false,
-    }
-}
-
-/// The part of `path` after `/Users/<name>/`, if it is inside a home folder.
-pub fn home_relative(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/Users/")?;
-    let slash = rest.find('/')?;
-    if slash == 0 {
-        return None;
-    }
-    rest.get(slash + 1..)
-}
+use thadam_core::paths::{MAX_SENSITIVE, check_pattern as path_pattern};
+pub use thadam_core::paths::{PathPattern, home_relative, under};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Matcher {
@@ -258,6 +194,8 @@ pub struct Tool {
     /// hook messages (ADR-017 Decision 4).
     pub hooks: bool,
     pub network: NetworkPolicy,
+    /// What Thadam may block for this tool (ADR-018).
+    pub guard: GuardSection,
 }
 
 impl Tool {
@@ -330,6 +268,7 @@ impl Registry {
                     .map(|p| PathPattern::parse(p))
                     .collect(),
                 hooks: entry.hooks,
+                guard: entry.guard,
                 network: NetworkPolicy {
                     known_hosts: network
                         .known_hosts
@@ -540,6 +479,11 @@ struct ToolEntry {
     #[serde(default)]
     #[garde(dive)]
     network: Option<NetworkEntry>,
+    /// ADR-018. HIDDEN COUPLING: the hook reads this field itself
+    /// (`thadam_core::guard::HookGuard::from_registry`); both use `GuardSection`.
+    #[serde(default)]
+    #[garde(skip)]
+    guard: GuardSection,
 }
 
 /// Per tool, the hosts it is expected to reach and the upload thresholds (ADR-007
@@ -619,8 +563,9 @@ struct PathsEntry {
     #[serde(default)]
     #[garde(inner(custom(path_pattern)))]
     not_outside: Vec<String>,
+    /// HIDDEN COUPLING: the hook reads this list too, with the same validator and limit.
     #[serde(default)]
-    #[garde(inner(custom(path_pattern)))]
+    #[garde(length(max = MAX_SENSITIVE), inner(custom(path_pattern)))]
     sensitive: Vec<String>,
 }
 
@@ -741,15 +686,6 @@ fn host_pattern(value: &str, _ctx: &()) -> garde::Result {
     }
 }
 
-fn path_pattern(value: &str, _ctx: &()) -> garde::Result {
-    let ok_start = value.starts_with('/') || value.starts_with("~/");
-    if ok_start && value.len() <= MAX_PATTERN && !value.contains('\0') {
-        Ok(())
-    } else {
-        Err(garde::Error::new("must start with '/' or '~/'"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,6 +784,33 @@ mod tests {
             1,
         );
         assert!(Registry::parse(&unknown).is_err());
+    }
+
+    #[test]
+    fn guard_modes_default_off_and_refuse_unknown_values() {
+        use thadam_core::GuardMode;
+        let r = Registry::parse(SAMPLE).unwrap();
+        assert!(
+            r.tools()
+                .all(|t| t.guard.files == GuardMode::Off && t.guard.network == GuardMode::Off)
+        );
+        let on = SAMPLE.replacen(
+            r#"{ "key": "cli_agent","#,
+            r#"{ "key": "cli_agent", "guard": { "files": "enforce", "network": "monitor" },"#,
+            1,
+        );
+        let r = Registry::parse(&on).unwrap();
+        let tool = r.tools().find(|t| t.key == "cli_agent").unwrap();
+        assert_eq!(tool.guard.files, GuardMode::Enforce);
+        assert_eq!(tool.guard.network, GuardMode::Monitor);
+        for bad in [r#""files": "block""#, r#""files": "off", "exec": "off""#] {
+            let json = SAMPLE.replacen(
+                r#"{ "key": "cli_agent","#,
+                &format!(r#"{{ "key": "cli_agent", "guard": {{ {bad} }},"#),
+                1,
+            );
+            assert!(Registry::parse(&json).is_err(), "{bad}");
+        }
     }
 
     #[test]

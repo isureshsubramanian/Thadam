@@ -30,6 +30,7 @@ pub const ADAPTER: Adapter = Adapter {
     key: KEY,
     events: EVENTS,
     parse,
+    deny: Some(deny),
     config: HookConfig {
         path: config::PATH,
         render: config::render,
@@ -89,8 +90,44 @@ fn classify(name: &str, input: &Value) -> (CallKind, Option<String>) {
         "Read" => (CallKind::FileRead, text(input, "file_path")),
         "Write" | "Edit" | "MultiEdit" => (CallKind::FileWrite, text(input, "file_path")),
         "NotebookEdit" => (CallKind::FileWrite, text(input, "notebook_path")),
+        // Searches read the files they search, so the guard checks where they look (ADR-018
+        // review). Without a path they search the working folder.
+        "Grep" => (CallKind::Search, glob_root(input, "glob")),
+        "LS" => (CallKind::Search, text(input, "path")),
+        "Glob" => (CallKind::Search, glob_root(input, "pattern")),
         _ => (CallKind::Other, None),
     }
+}
+
+/// Where a search looks: its `path`, joined with the fixed folders at the start of its file
+/// pattern (field `pattern_field`; `~/.ssh/*` looks in `~/.ssh`). `None` when neither
+/// narrows it. Best effort: a search of a parent folder may still read protected files below
+/// it (ADR-018 review C).
+fn glob_root(input: &Value, pattern_field: &str) -> Option<String> {
+    let pattern = text(input, pattern_field).unwrap_or_default();
+    let prefix = pattern
+        .split('/')
+        .take_while(|part| !part.contains(['*', '?', '[', '{']))
+        .collect::<Vec<_>>()
+        .join("/");
+    match (text(input, "path"), prefix.is_empty()) {
+        (Some(root), true) => Some(root),
+        (Some(root), false) if !prefix.starts_with(['/', '~']) => {
+            Some(format!("{}/{prefix}", root.trim_end_matches('/')))
+        }
+        (_, false) => Some(prefix),
+        (None, true) => None,
+    }
+}
+
+/// `PreToolUse` refusal: the call does not run and the agent sees `reason`.
+fn deny(reason: &str) -> String {
+    serde_json::json!({ "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    } })
+    .to_string()
 }
 
 fn start_reason(p: &Value) -> Reason {
