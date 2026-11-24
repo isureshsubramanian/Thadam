@@ -210,7 +210,9 @@ public sealed class QueryTests(StoreFixture store)
         Assert.Equal(JsonValueKind.Null, t2.GetProperty("total").ValueKind);
         Assert.Equal(24, (await GetAsync(client, "/api/v1/sessions/s-c1?internal=true")).GetProperty("total").GetInt64());
 
-        var search = await GetAsync(client, "/api/v1/events?q=session:s-b1&limit=2");
+        // Pinned to the sample data's dates: without a range, search covers the last 7 days
+        // from now, which the fixed sample data leaves behind as time passes.
+        var search = await GetAsync(client, "/api/v1/events?q=" + Uri.EscapeDataString("session:s-b1 from:2026-10-01 to:2026-11-30") + "&limit=2");
         Assert.Equal(2, search.GetProperty("items").GetArrayLength());
         Assert.Equal(3, search.GetProperty("total").GetInt64());
         Assert.False(search.GetProperty("totalCapped").GetBoolean());
